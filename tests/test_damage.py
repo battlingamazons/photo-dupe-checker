@@ -158,3 +158,22 @@ def test_old_index_is_upgraded(tmp_path):
     c.commit(); c.close()
     idx = core.Index(db)
     assert idx.upgraded and idx.count() == 0 and idx.folders() == ["x"]
+
+
+@pytest.mark.parametrize("kind", DAMAGE)
+def test_pristine_scan_finds_worn_stored_copy(kind, tmp_path):
+    """The reverse case: the library holds the worn-out print, the new scan is the nice one."""
+    folder = tmp_path / "scans"
+    folder.mkdir()
+    for i in range(20):
+        DAMAGE[kind](make_photo(i)).save(folder / f"p{i}.png")
+    idx = core.Index(tmp_path / "i.db")
+    idx.add_folder(str(folder))
+    assert idx.rescan()["added"] == 20
+    for i in (3, 14):
+        q = tmp_path / f"new{i}.png"
+        make_photo(i).save(q)
+        matches, _ = idx.search(str(q))
+        score, path = matches[0]
+        assert path.endswith(f"p{i}.png"), (kind, i, matches[:2])
+        assert score >= POSSIBLE, (kind, i, score)

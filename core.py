@@ -58,7 +58,7 @@ SENSITIVITY = {
     "Normal": (0.80, 0.60),
     "Generous": (0.75, 0.52),
 }
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def default_db_path():
@@ -190,13 +190,14 @@ def load_image(path, max_side=512):
 # brightness, fading, yellowing and stains and keeps the picture's structure.
 # A new scan is compared at many slight zoom/shift/rotation positions, so scanner
 # borders, crops, skew and torn corners don't stop it from lining up with the
-# stored copy. Each stored photo keeps two views (whole picture + centre crop) so
-# a frame on EITHER copy can be cut away before comparing.
+# stored copy. Each stored photo keeps four views (whole picture + three centre
+# crops of increasing tightness) so a border/frame of any common width on EITHER
+# copy can be cut away before comparing.
 # ---------------------------------------------------------------------------
 _SZ = 96            # working resolution
 _PAD = 48           # edge padding so zooming out has something to sample
 _T = 32             # descriptor is _T x _T
-DB_WINDOWS = (1.0, 0.82)
+DB_WINDOWS = (1.0, 0.9, 0.8, 0.7)
 QUERY_SCALES = (0.74, 0.8, 0.86, 0.92, 0.96, 1.0, 1.04, 1.09, 1.16, 1.25)
 QUERY_OFFSETS = (-0.04, 0.0, 0.04)
 _LAM, _MU = 0.25, 0.5   # small penalty so exact alignment wins over a lucky offset
@@ -422,8 +423,12 @@ class Index:
                 paths = [r[0] for r in rows]
                 n = len(rows)
                 if n:
-                    raw = np.frombuffer(b"".join(r[1] for r in rows), dtype=np.float16).reshape(n, len(DB_WINDOWS), _T * _T)
-                    views = [np.ascontiguousarray(raw[:, k, :], dtype=np.float32) for k in range(len(DB_WINDOWS))]
+                    nw = len(DB_WINDOWS)
+                    raw = np.empty((n, nw, _T * _T), dtype=np.float16)
+                    for i, r in enumerate(rows):
+                        raw[i] = np.frombuffer(r[1], dtype=np.float16).reshape(nw, _T * _T)
+                    views = [np.ascontiguousarray(raw[:, k, :], dtype=np.float32) for k in range(nw)]
+                    del raw
                 else:
                     views = [np.zeros((0, _T * _T), np.float32) for _ in DB_WINDOWS]
                 lookup = {os.path.normcase(p): i for i, p in enumerate(paths)}

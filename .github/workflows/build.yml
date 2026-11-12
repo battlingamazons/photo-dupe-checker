@@ -1,8 +1,13 @@
-name: Build Windows app
+name: Build Windows installer
 
 on:
   push:
+    branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
+
+permissions:
+  contents: write   # needed to attach the installer to a Release
 
 jobs:
   build:
@@ -21,20 +26,61 @@ jobs:
       - name: Run tests
         run: python -m pytest -q
 
-      - name: Build .exe
-        run: pyinstaller --onefile --windowed --name PhotoDupeChecker --collect-all tifffile --collect-all imagecodecs --collect-all pillow_heif --collect-all pypdfium2 --collect-all rawpy app.py
+      - name: Build app folder
+        run: pyinstaller --noconfirm --windowed --name PhotoDupeChecker --collect-all tifffile --collect-all imagecodecs --collect-all pillow_heif --collect-all pypdfium2 --collect-all rawpy app.py
 
-      - name: Smoke-test the built .exe
+      - name: Smoke-test the built app
         shell: pwsh
         run: |
-          Start-Process -FilePath .\dist\PhotoDupeChecker.exe -ArgumentList "--selftest","$PWD\selftest.txt" -Wait
-          if (-not (Test-Path selftest.txt)) { throw "Self-test produced no output - the .exe did not start" }
+          Start-Process -FilePath .\dist\PhotoDupeChecker\PhotoDupeChecker.exe -ArgumentList "--selftest","$PWD\selftest.txt" -Wait
+          if (-not (Test-Path selftest.txt)) { throw "Self-test produced no output - the app did not start" }
           $r = Get-Content selftest.txt -Raw
           Write-Host $r
           if (-not $r.StartsWith("OK")) { throw "Self-test failed: $r" }
 
+      - name: Work out version
+        id: ver
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like 'refs/tags/v*') { $v = $env:GITHUB_REF_NAME.Substring(1) }
+          else { $v = "0.1.$env:GITHUB_RUN_NUMBER" }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "Version $v"
+
+      - name: Build MSI installer
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          wix build Package.wxs -arch x64 -d Version=${{ steps.ver.outputs.version }} -o PhotoDupeChecker-${{ steps.ver.outputs.version }}.msi
+
+      - name: Test install, run, uninstall
+        shell: pwsh
+        run: |
+          $msi = (Resolve-Path "PhotoDupeChecker-${{ steps.ver.outputs.version }}.msi").Path
+          $p = Start-Process msiexec -ArgumentList "/i","`"$msi`"","/qn","/l*v","install.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content install.log -Tail 40; throw "Install failed: $($p.ExitCode)" }
+          $exe = "C:\Program Files\Photo Duplicate Checker\PhotoDupeChecker.exe"
+          if (-not (Test-Path $exe)) { throw "Installed exe missing" }
+          if (-not (Test-Path "$env:PUBLIC\Desktop\Photo Duplicate Checker.lnk")) { throw "Desktop shortcut missing" }
+          Remove-Item selftest.txt -ErrorAction SilentlyContinue
+          Start-Process -FilePath $exe -ArgumentList "--selftest","$PWD\selftest.txt" -Wait
+          $r = Get-Content selftest.txt -Raw
+          Write-Host "Installed app: $r"
+          if (-not $r.StartsWith("OK")) { throw "Installed app self-test failed: $r" }
+          $u = Start-Process msiexec -ArgumentList "/x","`"$msi`"","/qn" -Wait -PassThru
+          if ($u.ExitCode -ne 0) { throw "Uninstall failed: $($u.ExitCode)" }
+          if (Test-Path "C:\Program Files\Photo Duplicate Checker") { throw "Uninstall left files behind" }
+          Write-Host "Install / run / uninstall all OK"
+
       - uses: actions/upload-artifact@v4
         with:
-          name: PhotoDupeChecker-windows
-          path: dist/PhotoDupeChecker.exe
+          name: PhotoDupeChecker-installer
+          path: "*.msi"
           retention-days: 90
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create $env:GITHUB_REF_NAME (Get-Item *.msi).FullName --title "Photo Duplicate Checker $env:GITHUB_REF_NAME" --notes "Download the .msi below and double-click it to install."

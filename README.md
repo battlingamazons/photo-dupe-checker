@@ -39,7 +39,7 @@ Each photo is reduced to a small structural fingerprint that ignores overall bri
 fading, yellowing and stains. A new scan is compared to every stored photo at many slight
 zoom / shift / rotation positions, so these still match the original copy:
 faded, yellowed or stained prints; dust and scratches; torn corners; creases; scanner
-borders and dark scanner-bed edges; crops; a few degrees of skew; a sideways scan;
+flat borders and dark scanner-bed edges (these are cut away before comparing, so two unrelated scans that share the same border are not mistaken for each other); crops; a few degrees of skew; a sideways scan;
 lower resolution; and different file formats (e.g. a JPEG vs. an older TIFF).
 
 The four closest photos are always shown, even when the verdict is "looks new", so a

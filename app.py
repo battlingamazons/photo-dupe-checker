@@ -21,7 +21,7 @@ except Exception:  # noqa: BLE001
     DND_FILES, _Base = None, tk.Tk
 
 THUMB = 220
-COLORS = {"likely duplicate": "#b00020", "possible match": "#b26a00", "looks new": "#1b7f3b"}
+COLORS = {"likely duplicate": "#b00020", "possible match": "#b26a00", "check closest": "#44546a", "looks new": "#1b7f3b"}
 
 
 def resource_path(name):
@@ -340,11 +340,15 @@ class App(_Base):
             self._cards = []
             self.verdict.set("No other photos in the index to compare against.")
             return
-        v = core.verdict(self.matches[0][0], sens)
+        top = self.matches[0][0]
+        v = core.verdict(top, sens)
+        if v == "looks new" and top >= core.SENSITIVITY[sens][1] - 0.10:
+            v = "check closest"  # nothing convincing, but close enough that a worn copy could hide here
         text = {
             "likely duplicate": "Likely already scanned",
             "possible match": "Possible match - please compare by eye",
-            "looks new": "Looks new - no close match. (Closest photos shown in case it is a badly worn copy.)",
+            "check closest": "Probably new - but the closest photos below are worth a quick look (a badly worn copy can score low)",
+            "looks new": "Looks new - no close match found",
         }[v]
         if self.already:
             text += "   (this exact file is already in the index)"

@@ -177,3 +177,38 @@ def test_pristine_scan_finds_worn_stored_copy(kind, tmp_path):
         score, path = matches[0]
         assert path.endswith(f"p{i}.png"), (kind, i, matches[:2])
         assert score >= POSSIBLE, (kind, i, score)
+
+
+# --- Scanner borders: every stored scan has the same frame (e.g. all done on one scanner) ---
+def test_unrelated_framed_scans_do_not_match_each_other(tmp_path):
+    """Regression: matching on the shared frame made any framed scan look like a duplicate."""
+    folder = tmp_path / "scans"
+    folder.mkdir()
+    for i in range(25):
+        border(make_photo(i)).save(folder / f"p{i}.png")
+    idx = core.Index(tmp_path / "i.db")
+    idx.add_folder(str(folder))
+    assert idx.rescan()["added"] == 25
+    for k, kind in enumerate((lambda im: im, fade, yellow, scratches, lambda im: fade(skew(im)))):
+        q = tmp_path / f"unrelated{k}.png"
+        border(kind(make_photo(5000 + k))).save(q)
+        matches, _ = idx.search(str(q))
+        assert core.verdict(matches[0][0]) != "likely duplicate", (k, matches[:2])
+        assert matches[0][0] < core.SENSITIVITY["Normal"][0], (k, matches[:2])
+    for i in (2, 13):  # but the same photo, scanned again in worse shape, is still found
+        q = tmp_path / f"again{i}.png"
+        border(fade(make_photo(i))).save(q)
+        matches, _ = idx.search(str(q))
+        assert matches[0][1].endswith(f"p{i}.png") and matches[0][0] >= POSSIBLE, (i, matches[:2])
+
+
+def test_strip_frame_removes_flat_border_but_keeps_picture():
+    img = np.asarray(ImageOps.grayscale(make_photo(7).resize((96, 96))), dtype=np.float32)
+    framed = np.full((96, 96), 250.0, np.float32)
+    framed[3:93, 3:93] = np.asarray(ImageOps.grayscale(make_photo(7).resize((90, 90))), np.float32)
+    framed[:3], framed[-3:], framed[:, :3], framed[:, -3:] = 20.0, 20.0, 20.0, 20.0
+    out = core.strip_frame(framed)
+    assert np.allclose(out[0, 20:70], framed[3, 20:70])  # dark band replaced by the first picture row
+    assert out[:3, 20:70].min() > 20 or np.all(framed[3, 20:70] <= 20)  # no dark band left
+    assert np.allclose(out[30:60, 30:60], framed[30:60, 30:60])  # picture untouched
+    assert np.allclose(core.strip_frame(img)[10:86, 10:86], img[10:86, 10:86])  # no frame: unchanged centre

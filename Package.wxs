@@ -7,7 +7,7 @@
 
     <Icon Id="AppIcon.ico" SourceFile="icon.ico" />
     <Property Id="ARPPRODUCTICON" Value="AppIcon.ico" />
-    <MajorUpgrade DowngradeErrorMessage="A newer version of Photo Duplicate Checker is already installed." />
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of Photo Duplicate Checker is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
     <StandardDirectory Id="ProgramFiles64Folder">

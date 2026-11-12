@@ -89,6 +89,7 @@ class App(_Base):
         self._cards = []
         self._layout_job = None
         self._layout_size = (0, 0)
+        self._reindex_note = False
 
         self._build()
         self._refresh_folders()
@@ -100,6 +101,7 @@ class App(_Base):
         """After an update that changed how photos are matched, rebuild the index once."""
         if self.index.folders() and self.index.count() == 0 and not self.busy:
             if self.index.upgraded:
+                self._reindex_note = True
                 self.verdict.set("Matching was improved in this version - rebuilding your index (one time).")
             self.rescan()
 
@@ -263,6 +265,9 @@ class App(_Base):
         self._refresh_folders()
         parts = [f"{s['added']:,} added", f"{s['removed']:,} removed", f"{s['skipped']:,} unchanged"]
         self.status.set(f"{self.index.count():,} photos indexed  ({', '.join(parts)}).")
+        if self._reindex_note:
+            self._reindex_note = False
+            self.verdict.set("Index rebuilt with the improved matching. Drag a scan onto this window to check it.")
         notes = []
         if s["unavailable"]:
             notes.append("These folders could not be reached and were left as they were:\n" + "\n".join(s["unavailable"]))

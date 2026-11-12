@@ -54,11 +54,11 @@ except Exception:  # noqa: BLE001
 
 # Match score runs 0..1 (1 = identical). (likely duplicate, possible match) cut-offs.
 SENSITIVITY = {
-    "Strict": (0.85, 0.68),
-    "Normal": (0.80, 0.60),
-    "Generous": (0.75, 0.52),
+    "Strict": (0.85, 0.72),
+    "Normal": (0.80, 0.66),
+    "Generous": (0.75, 0.60),
 }
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 
 
 def default_db_path():
@@ -198,7 +198,7 @@ _SZ = 96            # working resolution
 _PAD = 48           # edge padding so zooming out has something to sample
 _T = 32             # descriptor is _T x _T
 DB_WINDOWS = (1.0, 0.9, 0.8, 0.7)
-QUERY_SCALES = (0.74, 0.8, 0.86, 0.92, 0.96, 1.0, 1.04, 1.09, 1.16, 1.25)
+QUERY_SCALES = (0.74, 0.8, 0.86, 0.92, 0.96, 1.0)  # zoom IN only: zooming out would drag frames into view
 QUERY_OFFSETS = (-0.04, 0.0, 0.04)
 _LAM, _MU = 0.25, 0.5   # small penalty so exact alignment wins over a lucky offset
 
@@ -210,13 +210,62 @@ def _gauss_matrix(n, sigma):
 
 
 _MH, _ML = _gauss_matrix(_T, 0.8), _gauss_matrix(_T, 2.2)
-_yy, _xx = np.mgrid[:_T, :_T]
-_W = np.exp(-(((_xx + 0.5) / _T - 0.5) ** 2 + ((_yy + 0.5) / _T - 0.5) ** 2) / (2 * 0.3**2)).astype(np.float32)
+# Weight each pixel by distance from the centre: full weight in the middle, fading to
+# ZERO towards the edge. Borders, scanner-bed edges and frames live there, and they look
+# alike across different photos from the same scanner - they must never drive a match.
+_FLAT, _END = 0.20, 0.36
+
+
+def _taper():
+    r = np.abs((np.arange(_T) + 0.5) / _T - 0.5)
+    w1 = np.where(r <= _FLAT, 1.0, np.where(r >= _END, 0.0, np.cos(np.pi / 2 * (r - _FLAT) / (_END - _FLAT)) ** 2))
+    return np.outer(w1, w1).astype(np.float32)
+
+
+_W = _taper()
+
+
+_FRAME_MAX = 0.22   # a border may take up to this fraction of each side
+_FLAT_TOL = 3.0     # grey-level spread below which an edge line counts as "flat"
+
+
+def _flat_run(a):
+    """How many lines from the top edge are flat (one colour): a white/black border or scanner bed."""
+    n, m = a.shape
+    lo, hi = int(0.2 * m), int(0.8 * m)
+    k = 0
+    while k < int(_FRAME_MAX * n):
+        seg = a[k, lo:hi]
+        if np.percentile(np.abs(seg - np.median(seg)), 80) < _FLAT_TOL:
+            k += 1
+        else:
+            break
+    return k
+
+
+def strip_frame(a):
+    """Erase flat borders/scanner-bed edges so only the photograph itself is described.
+
+    The border is overwritten by repeating the first real picture line outward, so the
+    picture keeps its position and no artificial frame edge remains to be matched.
+    """
+    out = a.copy()
+    n = a.shape[0]
+    kt, kb, kl, kr = _flat_run(a), _flat_run(a[::-1]), _flat_run(a.T), _flat_run(a.T[::-1])
+    if kt >= 2:
+        out[:kt] = out[kt]
+    if kb >= 2:
+        out[n - kb :] = out[n - kb - 1]
+    if kl >= 2:
+        out[:, :kl] = out[:, kl : kl + 1]
+    if kr >= 2:
+        out[:, n - kr :] = out[:, n - kr - 1 : n - kr]
+    return out
 
 
 def _prep(path):
     g = load_image(path).convert("L").resize((_SZ, _SZ), Image.LANCZOS)
-    return np.pad(np.asarray(g, dtype=np.float32), _PAD, mode="edge")
+    return np.pad(strip_frame(np.asarray(g, dtype=np.float32)), _PAD, mode="edge")
 
 
 def _window(P, s, dx, dy):

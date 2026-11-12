@@ -27,8 +27,14 @@ are kept, not deleted.
 
 ## Limits
 Heavily cropped or very differently toned scans can score lower, and two prints
-from the same negative look nearly identical. Supported: JPG, PNG, TIFF, BMP,
-GIF, WebP.
+from the same negative look nearly identical.
+
+## File formats
+TIFF is the priority and is tested extensively: 8/16-bit and 48-bit colour,
+grayscale, CMYK, LZW/ZIP/PackBits/JPEG compression, tiled, planar, BigTIFF,
+big-endian, and multi-page (first page is used). Also: JPEG, PNG, BMP, GIF, WebP,
+JPEG 2000, TGA, PCX, PPM/PGM, PSD, ICO, AVIF, HEIC/HEIF, PDF (first page) and
+camera RAW (DNG, CR2/CR3, NEF, ARW, ORF, RW2, RAF, PEF and more).
 
 ## Developing
 `pip install -r requirements.txt pytest && python -m pytest`

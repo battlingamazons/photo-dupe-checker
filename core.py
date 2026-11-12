@@ -13,7 +13,44 @@ from PIL import Image, ImageOps
 
 Image.MAX_IMAGE_PIXELS = None  # big archival TIFFs are expected
 
-EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".gif", ".webp"}
+# Formats Pillow reads on its own.
+EXTS = {
+    ".jpg", ".jpeg", ".jpe", ".jfif", ".png", ".tif", ".tiff", ".bmp", ".dib",
+    ".gif", ".webp", ".jp2", ".j2k", ".jpx", ".tga", ".pcx", ".ppm", ".pgm",
+    ".pbm", ".psd", ".ico", ".avif",
+}
+RAW_EXTS = {
+    ".dng", ".cr2", ".cr3", ".crw", ".nef", ".nrw", ".arw", ".srf", ".sr2",
+    ".orf", ".rw2", ".raf", ".pef", ".srw", ".3fr", ".erf", ".kdc", ".mrw",
+    ".x3f", ".iiq",
+}
+HEIF_EXTS = {".heic", ".heif", ".hif"}
+PDF_EXTS = {".pdf"}
+
+# Optional readers: if one is missing the app still works, just without it.
+try:
+    import pillow_heif
+
+    pillow_heif.register_heif_opener()
+    EXTS |= HEIF_EXTS
+except Exception:  # noqa: BLE001
+    pillow_heif = None
+try:
+    import pypdfium2
+
+    EXTS |= PDF_EXTS
+except Exception:  # noqa: BLE001
+    pypdfium2 = None
+try:
+    import tifffile
+except Exception:  # noqa: BLE001
+    tifffile = None
+try:
+    import rawpy
+
+    EXTS |= RAW_EXTS
+except Exception:  # noqa: BLE001
+    rawpy = None
 
 # Combined distance is out of 128 bits (64 from each of two hashes).
 SENSITIVITY = {
@@ -48,18 +85,121 @@ def is_image(name):
     return os.path.splitext(name)[1].lower() in EXTS
 
 
-def _open_gray(path):
-    """Open an image cheaply and return an auto-contrasted grayscale copy."""
-    with Image.open(path) as img:
+def _is_planar_tiff(path):
+    """True for TIFFs stored one colour plane at a time (PlanarConfiguration=2)."""
+    try:
+        with Image.open(path) as im:
+            return im.tag_v2.get(284) == 2
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _load_pdf(path, max_side):
+    pdf = pypdfium2.PdfDocument(path)
+    try:
+        page = pdf[0]  # first page only
+        w, h = page.get_size()
+        scale = max(0.5, min(4.0, max_side / max(w, h, 1)))
+        return page.render(scale=scale).to_pil().convert("RGB")
+    finally:
+        pdf.close()
+
+
+def _load_raw(path, max_side):
+    with rawpy.imread(path) as raw:
+        try:  # the embedded preview is far faster than developing the raw data
+            t = raw.extract_thumb()
+            import io
+
+            if t.format == rawpy.ThumbFormat.JPEG:
+                img = Image.open(io.BytesIO(t.data))
+                img.load()
+                return img.convert("RGB")
+            return Image.fromarray(t.data).convert("RGB")
+        except Exception:  # noqa: BLE001  (no usable preview)
+            return Image.fromarray(raw.postprocess(half_size=True, use_camera_wb=True))
+
+
+def _load_tiff_fallback(path, max_side):
+    """Read TIFFs Pillow can't (planar layout, odd bit depths, exotic compression)."""
+    with tifffile.TiffFile(path) as tf:
+        page = tf.pages[0]  # first page only
+        a = page.asarray()
+        photo = page.photometric
+    while a.ndim > 3:
+        a = a[0]
+    if a.ndim == 3 and a.shape[0] <= 5 and a.shape[0] < a.shape[-1]:
+        a = np.moveaxis(a, 0, -1)  # planar (channels, h, w) -> (h, w, channels)
+    step = max(1, max(a.shape[0], a.shape[1]) // (max_side * 2))
+    a = a[::step, ::step]
+    if a.ndim == 3 and a.shape[2] == 1:
+        a = a[:, :, 0]
+    if a.dtype == np.bool_:
+        a = a.astype(np.uint8) * 255
+    if a.dtype != np.uint8:
+        f = a.astype(np.float64)
+        lo, hi = float(f.min()), float(f.max())
+        a = ((f - lo) / max(hi - lo, 1e-12) * 255).astype(np.uint8)
+    if "MINISWHITE" in str(photo):
+        a = 255 - a
+    if a.ndim == 2:
+        return Image.fromarray(a, "L")
+    c = a.shape[2]
+    if c >= 4 and "SEPARATED" in str(photo):
+        return Image.fromarray(a[:, :, :4], "CMYK").convert("RGB")
+    if c == 2:
+        return Image.fromarray(a[:, :, 0], "L")
+    return Image.fromarray(a[:, :, :3], "RGB")
+
+
+def _load_pillow(path, max_side):
+    with Image.open(path) as im:
         try:
-            img.draft("L", (512, 512))  # fast path for JPEG
-        except Exception:
+            im.draft("RGB", (max_side * 2, max_side * 2))  # fast path for JPEG
+        except Exception:  # noqa: BLE001
             pass
-        img = ImageOps.exif_transpose(img)
-        g = img.convert("L")
+        im = ImageOps.exif_transpose(im)
+        if im.mode in ("P", "PA", "LA", "RGBA"):
+            im = im.convert("RGBA")
+            bg = Image.new("RGBA", im.size, (255, 255, 255, 255))
+            im = Image.alpha_composite(bg, im)  # transparency -> white
+        elif im.mode in ("I;16", "I;16B", "I;16L", "I;16N", "I", "F"):
+            a = np.asarray(im, dtype=np.float64)
+            im = Image.fromarray(((a - a.min()) / max(a.max() - a.min(), 1e-12) * 255).astype("uint8"))
+        elif im.mode not in ("L", "RGB"):
+            im = im.convert("RGB")
+        return im.copy()
+
+
+def load_image(path, max_side=512):
+    """Open any supported file as a (possibly shrunken) RGB/L PIL image.
+
+    Multi-page files (PDF, TIFF) use their first page.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext in PDF_EXTS and pypdfium2:
+        img = _load_pdf(path, max_side)
+    elif ext in RAW_EXTS and rawpy:
+        img = _load_raw(path, max_side)
+    elif ext in (".tif", ".tiff") and tifffile:
+        if _is_planar_tiff(path):  # Pillow can silently mis-decode these
+            img = _load_tiff_fallback(path, max_side)
+        else:
+            try:
+                img = _load_pillow(path, max_side)
+            except Exception:  # noqa: BLE001  (odd bit depth, exotic compression, ...)
+                img = _load_tiff_fallback(path, max_side)
+    else:
+        img = _load_pillow(path, max_side)
+    img = img.convert("RGB") if img.mode not in ("L", "RGB") else img
     # Shrink early so huge TIFFs don't make later steps slow.
-    g.thumbnail((512, 512), Image.LANCZOS)
-    return ImageOps.autocontrast(g, cutoff=1)
+    img.thumbnail((max_side, max_side), Image.LANCZOS)
+    return img
+
+
+def _open_gray(path):
+    """Return an auto-contrasted grayscale copy of the photo."""
+    return ImageOps.autocontrast(load_image(path).convert("L"), cutoff=1)
 
 
 def _pack(bits):

@@ -22,7 +22,7 @@ jobs:
         run: python -m pytest -q
 
       - name: Build .exe
-        run: pyinstaller --onefile --windowed --name PhotoDupeChecker app.py
+        run: pyinstaller --onefile --windowed --name PhotoDupeChecker --collect-all tifffile --collect-all imagecodecs --collect-all pillow_heif --collect-all pypdfium2 --collect-all rawpy app.py
 
       - name: Smoke-test the built .exe
         shell: pwsh

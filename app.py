@@ -7,7 +7,7 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from PIL import Image, ImageOps, ImageTk
+from PIL import Image, ImageTk
 
 import core
 
@@ -30,12 +30,7 @@ def reveal(path):
 
 
 def thumbnail(path):
-    with Image.open(path) as img:
-        try:
-            img.draft("RGB", (THUMB * 2, THUMB * 2))
-        except Exception:
-            pass
-        img = ImageOps.exif_transpose(img).convert("RGB")
+    img = core.load_image(path, max_side=THUMB * 2).convert("RGB")
     img.thumbnail((THUMB, THUMB))
     return ImageTk.PhotoImage(img)
 
@@ -185,7 +180,7 @@ class App(tk.Tk):
     def check(self):
         path = filedialog.askopenfilename(
             title="Choose the new scan",
-            filetypes=[("Photos", "*.jpg *.jpeg *.png *.tif *.tiff *.bmp *.gif *.webp"), ("All files", "*.*")],
+            filetypes=[("Photos and scans", " ".join(f"*{e}" for e in sorted(core.EXTS))), ("All files", "*.*")],
         )
         if not path:
             return
@@ -270,21 +265,28 @@ def selftest(out_path):
 
     msgs = []
     try:
-        tk.Tk().destroy()
+        root = tk.Tk()  # must stay alive: ImageTk needs a default root
         msgs.append("tk ok")
         d = tempfile.mkdtemp()
         rng = np.random.default_rng(1)
-        for i in range(5):
-            arr = (rng.random((30, 40, 3)) * 255).astype("uint8")
-            Image.fromarray(arr).resize((400, 300)).save(os.path.join(d, f"{i}.jpg"))
+        base = Image.fromarray((rng.random((30, 40, 3)) * 255).astype("uint8")).resize((400, 300))
+        for ext in (".jpg", ".png", ".tif", ".bmp", ".gif", ".webp", ".jp2", ".tga"):
+            base.save(os.path.join(d, "x" + ext))
+        base.save(os.path.join(d, "x.pdf"))
+        if core.pillow_heif:
+            import pillow_heif
+
+            pillow_heif.from_pillow(base).save(os.path.join(d, "x.heic"))
         idx = core.Index(os.path.join(d, "t.db"))
         idx.add_folder(d)
         s = idx.rescan()
-        assert s["added"] == 5, s
-        m, _ = idx.search(os.path.join(d, "2.jpg"))
-        assert m, "no matches"
-        thumbnail(os.path.join(d, "2.jpg"))
-        msgs.append("core ok")
+        assert not s["failed"], s["failed"]
+        msgs.append(f"{s['added']} files ok")
+        assert core.pypdfium2 and core.pillow_heif and core.rawpy, "optional reader missing"
+        m, _ = idx.search(os.path.join(d, "x.jpg"))
+        assert m and m[0][0] <= 12, m[:1]
+        thumbnail(os.path.join(d, "x.pdf"))
+        root.destroy()
         result = "OK " + " ".join(msgs)
     except Exception as e:  # noqa: BLE001
         result = f"FAIL {type(e).__name__}: {e}"

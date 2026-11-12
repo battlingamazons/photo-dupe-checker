@@ -1,2 +1,7 @@
 pillow
 numpy
+tifffile
+imagecodecs
+pillow-heif
+pypdfium2
+rawpy

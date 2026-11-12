@@ -41,9 +41,16 @@ jobs:
       - name: Work out version
         id: ver
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           if ($env:GITHUB_REF -like 'refs/tags/v*') { $v = $env:GITHUB_REF_NAME.Substring(1) }
-          else { $v = "0.1.$env:GITHUB_RUN_NUMBER" }
+          else {
+            # Dev builds must sort just ABOVE the latest release, or Windows treats them as downgrades.
+            $latest = gh release list --limit 1 --json tagName -q '.[0].tagName'
+            if ($latest -match '^v(\d+)\.(\d+)\.(\d+)$') { $v = "$($Matches[1]).$($Matches[2]).$([int]$Matches[3] + 1)" }
+            else { $v = "0.1.$env:GITHUB_RUN_NUMBER" }
+          }
           "version=$v" >> $env:GITHUB_OUTPUT
           Write-Host "Version $v"
 

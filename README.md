@@ -4,12 +4,21 @@ Asks "have we already scanned this photo?" by comparing how photos *look*, so it
 still works when the new scan has a different size, brightness, file type or
 orientation. Everything runs offline on the local computer; no photos leave it.
 
-## Getting the app
-1. On GitHub open the repo's **Actions** tab, click the latest green run.
-2. Download **PhotoDupeChecker-windows** from *Artifacts* and unzip it.
-3. Copy `PhotoDupeChecker.exe` anywhere (e.g. the desktop) and double-click it.
-   Windows may say "Windows protected your PC" because the app is unsigned:
+## Installing
+1. On GitHub open the repo's **Releases** page (right-hand side of the repo home page).
+2. Download the `.msi` under the newest release and double-click it. It installs like
+   any other program and adds Start Menu and Desktop shortcuts.
+   Windows may say "Windows protected your PC" because the installer is unsigned:
    click **More info**, then **Run anyway**.
+3. To remove it: Settings > Apps > Photo Duplicate Checker > Uninstall. Your photos
+   and the index file are not touched.
+
+Installing a newer version over an older one upgrades it in place.
+
+## Making a new release (developers)
+`git tag v1.0.1 && git push origin v1.0.1` - GitHub builds, tests (including a real
+install/run/uninstall) and publishes the MSI on the Releases page. Every push to
+`main` also builds one, available under Actions > the run > Artifacts.
 
 ## Using it
 1. **Add folder...** for each folder of already-scanned photos. The first scan of
@@ -38,4 +47,4 @@ camera RAW (DNG, CR2/CR3, NEF, ARW, ORF, RW2, RAF, PEF and more).
 
 ## Developing
 `pip install -r requirements.txt pytest && python -m pytest`
-The Windows build is defined in `.github/workflows/build.yml`.
+The Windows build is defined in `.github/workflows/build.yml`; the installer in `Package.wxs`.

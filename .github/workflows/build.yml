@@ -72,6 +72,34 @@ jobs:
           if (Test-Path "C:\Program Files\Photo Duplicate Checker") { throw "Uninstall left files behind" }
           Write-Host "Install / run / uninstall all OK"
 
+      - name: Test upgrade over the previous release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $prev = gh release list --limit 10 --json tagName -q '.[].tagName' | Where-Object { $_ -ne $env:GITHUB_REF_NAME } | Select-Object -First 1
+          if (-not $prev) { Write-Host "No earlier release to upgrade from - skipping"; exit 0 }
+          Write-Host "Upgrading from $prev"
+          New-Item -ItemType Directory prev | Out-Null
+          gh release download $prev --pattern '*.msi' --dir prev
+          $old = (Get-ChildItem prev\*.msi | Select-Object -First 1).FullName
+          $new = (Resolve-Path "PhotoDupeChecker-${{ steps.ver.outputs.version }}.msi").Path
+          $p = Start-Process msiexec -ArgumentList "/i","`"$old`"","/qn" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Installing previous release failed: $($p.ExitCode)" }
+          $p = Start-Process msiexec -ArgumentList "/i","`"$new`"","/qn","/l*v","upgrade.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Select-String -Path upgrade.log -Pattern "Error|1714|Return value 3" | Select-Object -First 15 | ForEach-Object { $_.Line }; throw "Upgrade failed: $($p.ExitCode)" }
+          $entries = @(Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*" | Where-Object { $_.DisplayName -eq "Photo Duplicate Checker" })
+          if ($entries.Count -ne 1) { throw "Expected exactly one installed copy after upgrade, found $($entries.Count)" }
+          if ($entries[0].DisplayVersion -ne "${{ steps.ver.outputs.version }}") { throw "Version after upgrade is $($entries[0].DisplayVersion)" }
+          Remove-Item selftest.txt -ErrorAction SilentlyContinue
+          Start-Process -FilePath "C:\Program Files\Photo Duplicate Checker\PhotoDupeChecker.exe" -ArgumentList "--selftest","$PWD\selftest.txt" -Wait
+          $r = Get-Content selftest.txt -Raw
+          Write-Host "After upgrade: $r"
+          if (-not $r.StartsWith("OK")) { throw "App failed after upgrade: $r" }
+          $u = Start-Process msiexec -ArgumentList "/x","`"$new`"","/qn" -Wait -PassThru
+          if ($u.ExitCode -ne 0) { throw "Uninstall after upgrade failed: $($u.ExitCode)" }
+          Write-Host "Upgrade from $prev OK"
+
       - uses: actions/upload-artifact@v4
         with:
           name: PhotoDupeChecker-installer

@@ -1,0 +1,13 @@
+__pycache__/
+.pytest_cache/
+build/
+dist/
+*.spec
+*.db
+selftest.txt
+# Never commit photos
+*.jpg
+*.jpeg
+*.png
+*.tif
+*.tiff

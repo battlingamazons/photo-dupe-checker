@@ -1,0 +1,40 @@
+name: Build Windows app
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest pyinstaller
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Build .exe
+        run: pyinstaller --onefile --windowed --name PhotoDupeChecker app.py
+
+      - name: Smoke-test the built .exe
+        shell: pwsh
+        run: |
+          Start-Process -FilePath .\dist\PhotoDupeChecker.exe -ArgumentList "--selftest","$PWD\selftest.txt" -Wait
+          if (-not (Test-Path selftest.txt)) { throw "Self-test produced no output - the .exe did not start" }
+          $r = Get-Content selftest.txt -Raw
+          Write-Host $r
+          if (-not $r.StartsWith("OK")) { throw "Self-test failed: $r" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PhotoDupeChecker-windows
+          path: dist/PhotoDupeChecker.exe
+          retention-days: 90

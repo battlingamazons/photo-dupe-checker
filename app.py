@@ -11,8 +11,20 @@ from PIL import Image, ImageTk
 
 import core
 
+try:  # drag-and-drop support; the app still works (button only) without it
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+
+    _Base = TkinterDnD.Tk
+except Exception:  # noqa: BLE001
+    DND_FILES, _Base = None, tk.Tk
+
 THUMB = 220
 COLORS = {"likely duplicate": "#b00020", "possible match": "#b26a00", "looks new": "#1b7f3b"}
+
+
+def resource_path(name):
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, name)
 
 
 def open_path(path):
@@ -35,15 +47,22 @@ def thumbnail(path):
     return ImageTk.PhotoImage(img)
 
 
-class App(tk.Tk):
-    def __init__(self):
+class App(_Base):
+    def __init__(self, index=None):
         super().__init__()
         self.title("Photo Duplicate Checker")
+        self.icon_ok = False
+        try:
+            self.iconbitmap(default=resource_path("icon.ico"))
+            self.icon_ok = True
+        except Exception:  # noqa: BLE001  (e.g. not Windows)
+            pass
         w = min(1100, self.winfo_screenwidth() - 40)
         h = min(760, self.winfo_screenheight() - 100)
         self.geometry(f"{w}x{h}+10+10")
         self.minsize(min(900, w), min(640, h))
-        self.index = core.Index()
+        self.index = index or core.Index()
+        self.matches, self.already = [], False
         self.q = queue.Queue()
         self.cancel = threading.Event()
         self.busy = False
@@ -52,7 +71,45 @@ class App(tk.Tk):
 
         self._build()
         self._refresh_folders()
+        self._enable_drop()
         self._poll()
+
+    # ---------- drag and drop ----------
+    def _enable_drop(self):
+        if not DND_FILES:
+            return
+        self._register_drop(self)
+
+    def _register_drop(self, widget):
+        """Make a widget and everything inside it accept dropped files."""
+        try:
+            widget.drop_target_register(DND_FILES)
+            widget.dnd_bind("<<Drop>>", self._on_drop)
+        except Exception:  # noqa: BLE001
+            pass
+        for child in widget.winfo_children():
+            self._register_drop(child)
+
+    def _on_drop(self, event):
+        paths = [p for p in self.tk.splitlist(event.data)]
+        files = [p for p in paths if os.path.isfile(p)]
+        dirs = [p for p in paths if os.path.isdir(p)]
+        if files:
+            if len(files) > 1:
+                self.status.set(f"{len(files)} files dropped - checking the first one ({os.path.basename(files[0])}).")
+            self.check_path(files[0])
+        elif dirs:
+            names = "\n".join(dirs[:5])
+            if messagebox.askyesno(
+                "Add folder?",
+                f"You dropped a folder:\n\n{names}\n\nAdd it to the folders of photos already scanned?\n"
+                "(To check a single photo, drop the photo file itself.)",
+            ):
+                for d in dirs:
+                    self.index.add_folder(d)
+                self._refresh_folders()
+                self.rescan()
+        return event.action
 
     # ---------- layout ----------
     def _build(self):
@@ -82,7 +139,8 @@ class App(tk.Tk):
         mid.pack(fill="x", **pad)
         self.btn_check = ttk.Button(mid, text="Choose a scan to check...", command=self.check)
         self.btn_check.pack(side="left", padx=8, pady=8)
-        ttk.Label(mid, text="Sensitivity:").pack(side="left", padx=(16, 4))
+        ttk.Label(mid, text="or drag a photo anywhere onto this window", foreground="#555").pack(side="left", padx=(10, 0))
+        ttk.Label(mid, text="Sensitivity:").pack(side="left", padx=(24, 4))
         self.sens = ttk.Combobox(mid, values=list(core.SENSITIVITY), state="readonly", width=10)
         self.sens.set("Generous")
         self.sens.pack(side="left")
@@ -90,7 +148,7 @@ class App(tk.Tk):
         self.btn_addfile = ttk.Button(mid, text="Add this photo to the collection", command=self.add_current, state="disabled")
         self.btn_addfile.pack(side="right", padx=8)
 
-        self.verdict = tk.StringVar(value="Add your folders above, then choose a scan to check.")
+        self.verdict = tk.StringVar(value="Add your folders above, then drag a scan onto this window to check it.")
         self.verdict_label = tk.Label(self, textvariable=self.verdict, font=("Segoe UI", 15, "bold"), anchor="w")
         self.verdict_label.pack(fill="x", padx=12, pady=(6, 0))
 
@@ -184,7 +242,16 @@ class App(tk.Tk):
             title="Choose the new scan",
             filetypes=[("Photos and scans", " ".join(f"*{e}" for e in sorted(core.EXTS))), ("All files", "*.*")],
         )
-        if not path:
+        if path:
+            self.check_path(path)
+
+    def check_path(self, path):
+        """Compare one photo (chosen or dropped) against the index and show the result."""
+        if not core.is_image(path):
+            messagebox.showinfo("Not a supported photo", f"{os.path.basename(path)} is not a photo or scan type this program can read.")
+            return
+        if self.busy:
+            messagebox.showinfo("Still indexing", "Please wait for indexing to finish, then check the photo again.")
             return
         if self.index.count() == 0:
             messagebox.showinfo("Nothing to compare", "The index is empty. Add a folder and let it finish scanning first.")
@@ -196,6 +263,8 @@ class App(tk.Tk):
             messagebox.showerror("Could not read that photo", str(e))
             return
         self.show_results()
+        if DND_FILES:
+            self._register_drop(self.results)
 
     def show_results(self):
         for w in self.results.winfo_children():
@@ -260,15 +329,14 @@ class App(tk.Tk):
 
 
 def selftest(out_path):
-    """Used by the Windows build to prove the packaged .exe really starts up."""
+    """Used by the Windows build to prove the packaged app really works end to end."""
     import tempfile
+    from types import SimpleNamespace
 
     import numpy as np
 
     msgs = []
     try:
-        root = tk.Tk()  # must stay alive: ImageTk needs a default root
-        msgs.append("tk ok")
         d = tempfile.mkdtemp()
         rng = np.random.default_rng(1)
         base = Image.fromarray((rng.random((30, 40, 3)) * 255).astype("uint8")).resize((400, 300))
@@ -284,11 +352,25 @@ def selftest(out_path):
         s = idx.rescan()
         assert not s["failed"], s["failed"]
         msgs.append(f"{s['added']} files ok")
-        assert core.pypdfium2 and core.pillow_heif and core.rawpy, "optional reader missing"
-        m, _ = idx.search(os.path.join(d, "x.jpg"))
-        assert m and m[0][0] <= 12, m[:1]
+        assert core.pypdfium2 and core.pillow_heif and core.rawpy and core.tifffile, "optional reader missing"
+        assert DND_FILES, "drag-and-drop library missing"
+        msgs.append("dnd lib ok")
+
+        app = App(index=idx)  # builds the whole window (also keeps a Tk root alive)
+        app.update()
+        if sys.platform.startswith("win"):
+            assert app.icon_ok, "window icon failed to load"
+            msgs.append("icon ok")
+        # simulate dropping a file whose path contains a space (Tk wraps it in braces)
+        spaced = os.path.join(d, "my photo.png")
+        base.save(spaced)
+        app._on_drop(SimpleNamespace(data="{" + spaced + "}", action="copy"))
+        app.update()
+        assert app.query_path == spaced and app.matches, "drop did not trigger a check"
+        assert app.matches[0][0] <= 12, app.matches[:1]
+        msgs.append("drop ok")
         thumbnail(os.path.join(d, "x.pdf"))
-        root.destroy()
+        app.destroy()
         result = "OK " + " ".join(msgs)
     except Exception as e:  # noqa: BLE001
         result = f"FAIL {type(e).__name__}: {e}"

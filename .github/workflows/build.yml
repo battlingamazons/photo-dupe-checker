@@ -27,7 +27,7 @@ jobs:
         run: python -m pytest -q
 
       - name: Build app folder
-        run: pyinstaller --noconfirm --windowed --name PhotoDupeChecker --collect-all tifffile --collect-all imagecodecs --collect-all pillow_heif --collect-all pypdfium2 --collect-all rawpy app.py
+        run: pyinstaller --noconfirm --windowed --name PhotoDupeChecker --icon icon.ico --add-data "icon.ico;." --collect-all tkinterdnd2 --collect-all tifffile --collect-all imagecodecs --collect-all pillow_heif --collect-all pypdfium2 --collect-all rawpy app.py
 
       - name: Smoke-test the built app
         shell: pwsh

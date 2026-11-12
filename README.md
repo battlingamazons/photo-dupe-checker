@@ -34,9 +34,25 @@ The index is stored in `%APPDATA%\PhotoDupeChecker\index.db`. Photo files are
 never modified. If a folder's drive is unplugged during a rescan, its entries
 are kept, not deleted.
 
+## How matching works
+Each photo is reduced to a small structural fingerprint that ignores overall brightness,
+fading, yellowing and stains. A new scan is compared to every stored photo at many slight
+zoom / shift / rotation positions, so these still match the original copy:
+faded, yellowed or stained prints; dust and scratches; torn corners; creases; scanner
+borders and dark scanner-bed edges; crops; a few degrees of skew; a sideways scan;
+lower resolution; and different file formats (e.g. a JPEG vs. an older TIFF).
+
+The four closest photos are always shown, even when the verdict is "looks new", so a
+badly worn copy can still be recognised by eye. Matches are suggestions; confirm by eye.
+
 ## Limits
-Heavily cropped or very differently toned scans can score lower, and two prints
-from the same negative look nearly identical.
+Very heavily damaged copies (faint, stained, creased, cropped and bordered all at once)
+may score low, but usually still appear among the four closest. Photos with large
+featureless areas, or two prints from the same negative, can look alike. Different photos
+of the same scene or pose can score as "possible match".
+
+When an update changes how photos are matched, the index is rebuilt automatically the
+first time the new version starts (the progress bar shows it).
 
 ## File formats
 TIFF is the priority and is tested extensively: 8/16-bit and 48-bit colour,

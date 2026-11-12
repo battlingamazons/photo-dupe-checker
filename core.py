@@ -52,25 +52,13 @@ try:
 except Exception:  # noqa: BLE001
     rawpy = None
 
-# Combined distance is out of 128 bits (64 from each of two hashes).
+# Match score runs 0..1 (1 = identical). (likely duplicate, possible match) cut-offs.
 SENSITIVITY = {
-    "Strict": (8, 20),
-    "Normal": (12, 28),
-    "Generous": (16, 36),
+    "Strict": (0.85, 0.68),
+    "Normal": (0.80, 0.60),
+    "Generous": (0.75, 0.52),
 }
-
-_POP = np.array([bin(i).count("1") for i in range(256)], dtype=np.uint8)
-
-
-def _dct_matrix(n=32):
-    k = np.arange(n)[:, None]
-    i = np.arange(n)[None, :]
-    m = np.cos(np.pi * (2 * i + 1) * k / (2 * n)) * np.sqrt(2.0 / n)
-    m[0] /= np.sqrt(2)
-    return m
-
-
-_DCT = _dct_matrix()
+SCHEMA_VERSION = 2
 
 
 def default_db_path():
@@ -197,43 +185,95 @@ def load_image(path, max_side=512):
     return img
 
 
-def _open_gray(path):
-    """Return an auto-contrasted grayscale copy of the photo."""
-    return ImageOps.autocontrast(load_image(path).convert("L"), cutoff=1)
+# ---------------------------------------------------------------------------
+# Matching: each photo is reduced to a "band-pass" thumbnail that ignores overall
+# brightness, fading, yellowing and stains and keeps the picture's structure.
+# A new scan is compared at many slight zoom/shift/rotation positions, so scanner
+# borders, crops, skew and torn corners don't stop it from lining up with the
+# stored copy. Each stored photo keeps two views (whole picture + centre crop) so
+# a frame on EITHER copy can be cut away before comparing.
+# ---------------------------------------------------------------------------
+_SZ = 96            # working resolution
+_PAD = 48           # edge padding so zooming out has something to sample
+_T = 32             # descriptor is _T x _T
+DB_WINDOWS = (1.0, 0.82)
+QUERY_SCALES = (0.74, 0.8, 0.86, 0.92, 0.96, 1.0, 1.04, 1.09, 1.16, 1.25)
+QUERY_OFFSETS = (-0.04, 0.0, 0.04)
+_LAM, _MU = 0.25, 0.5   # small penalty so exact alignment wins over a lucky offset
 
 
-def _pack(bits):
-    return np.packbits(np.asarray(bits, dtype=np.uint8)).tobytes()
+def _gauss_matrix(n, sigma):
+    i = np.arange(n)
+    m = np.exp(-((i[:, None] - i[None, :]) ** 2) / (2 * sigma**2))
+    return (m / m.sum(1, keepdims=True)).astype(np.float32)
 
 
-def hash_gray(g):
-    """Return (phash, dhash) as 8-byte strings each."""
-    a = np.asarray(g.resize((32, 32), Image.LANCZOS), dtype=np.float64)
-    low = (_DCT @ a @ _DCT.T)[:8, :8].flatten()
-    ph = low > np.median(low[1:])
-    s = np.asarray(g.resize((9, 8), Image.LANCZOS), dtype=np.float64)
-    dh = (s[:, 1:] > s[:, :-1]).flatten()
-    return _pack(ph), _pack(dh)
+_MH, _ML = _gauss_matrix(_T, 0.8), _gauss_matrix(_T, 2.2)
+_yy, _xx = np.mgrid[:_T, :_T]
+_W = np.exp(-(((_xx + 0.5) / _T - 0.5) ** 2 + ((_yy + 0.5) / _T - 0.5) ** 2) / (2 * 0.3**2)).astype(np.float32)
 
 
-def hash_file(path):
-    return hash_gray(_open_gray(path))
+def _prep(path):
+    g = load_image(path).convert("L").resize((_SZ, _SZ), Image.LANCZOS)
+    return np.pad(np.asarray(g, dtype=np.float32), _PAD, mode="edge")
 
 
-def hash_file_rotations(path):
-    """Hashes for the photo at 0/90/180/270 degrees (scans are often sideways)."""
-    g = _open_gray(path)
-    rots = [
-        g,
-        g.transpose(Image.ROTATE_90),
-        g.transpose(Image.ROTATE_180),
-        g.transpose(Image.ROTATE_270),
-    ]
-    return [hash_gray(r) for r in rots]
+def _window(P, s, dx, dy):
+    """Descriptor of the picture zoomed by s and shifted by (dx, dy) fractions."""
+    im = Image.fromarray(np.ascontiguousarray(P), "F")
+    sc = _SZ * s / _T
+    c = _PAD + _SZ / 2 + dx * _SZ - sc * _T / 2
+    f = _PAD + _SZ / 2 + dy * _SZ - sc * _T / 2
+    w = np.asarray(im.transform((_T, _T), Image.AFFINE, (sc, 0, c, 0, sc, f), resample=Image.BILINEAR), np.float32)
+    if w.std() < 1.5:  # blank / featureless: matches nothing
+        return np.zeros(_T * _T, np.float32)
+    b = _MH @ w @ _MH.T - _ML @ w @ _ML.T
+    sd = 1.4826 * np.median(np.abs(b)) + 1e-6
+    b = np.clip(b / sd, -3, 3) * _W
+    b = b - (b.sum() / _W.sum()) * _W
+    n = np.linalg.norm(b)
+    return (b / n).ravel() if n > 1e-4 else np.zeros(_T * _T, np.float32)
 
 
-def _arr(blobs):
-    return np.frombuffer(b"".join(blobs), dtype=np.uint8).reshape(-1, 8)
+def describe(path):
+    """What gets stored for an indexed photo: (len(DB_WINDOWS), T*T) float16."""
+    P = _prep(path)
+    return np.stack([_window(P, s, 0, 0) for s in DB_WINDOWS]).astype(np.float16)
+
+
+def _query(path):
+    """All the positions a new scan is tried at (4 rotations x zooms x shifts)."""
+    P = _prep(path)
+    vs, scales, shifts = [], [], []
+    for rot in range(4):
+        Pr = np.rot90(P, rot)
+        for s in QUERY_SCALES:
+            for dx in QUERY_OFFSETS:
+                for dy in QUERY_OFFSETS:
+                    vs.append(_window(Pr, s, dx, dy))
+                    scales.append(s)
+                    shifts.append(abs(dx) + abs(dy))
+    return np.array(vs, np.float32), np.array(scales, np.float32), np.array(shifts, np.float32)
+
+
+def _best_scores(V, scales, shifts, db_views):
+    """db_views: one (N, T*T) float32 array per DB window. Returns best score per photo."""
+    best = None
+    for D, sd in zip(db_views, DB_WINDOWS):
+        pen = (_LAM * np.abs(np.log(scales / sd)) + _MU * shifts).astype(np.float32)
+        for i in range(0, len(V), 128):
+            c = D @ V[i : i + 128].T
+            c -= pen[i : i + 128]
+            m = c.max(axis=1)
+            best = m if best is None else np.maximum(best, m)
+    return best
+
+
+def similarity(path_a, path_b):
+    """Match score (0..1) between two photo files; mainly for tests."""
+    V, s, sh = _query(path_a)
+    d = describe(path_b).astype(np.float32)
+    return float(_best_scores(V, s, sh, [d[0:1], d[1:2]])[0])
 
 
 class Index:
@@ -241,15 +281,26 @@ class Index:
         self.db_path = str(db_path or default_db_path())
         self._lock = threading.RLock()
         self._db = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._db.execute("CREATE TABLE IF NOT EXISTS folders (path TEXT PRIMARY KEY)")
+        version = self._db.execute("PRAGMA user_version").fetchone()[0]
+        self.upgraded = False
+        if version < SCHEMA_VERSION:  # older versions used a different matching method
+            had = self._db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='files'"
+            ).fetchone()
+            if had:
+                self.upgraded = self._db.execute("SELECT COUNT(*) FROM files").fetchone()[0] > 0
+                self._db.execute("DROP TABLE files")
+            self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self._db.executescript(
             """
-            CREATE TABLE IF NOT EXISTS folders (path TEXT PRIMARY KEY);
             CREATE TABLE IF NOT EXISTS files (
                 path TEXT PRIMARY KEY, folder TEXT, size INTEGER, mtime REAL,
-                ph BLOB NOT NULL, dh BLOB NOT NULL);
+                desc BLOB NOT NULL);
             CREATE INDEX IF NOT EXISTS files_folder ON files(folder);
             """
         )
+        self._db.commit()
         self._cache = None
 
     # ---- folders ----
@@ -324,19 +375,19 @@ class Index:
                 if cancel and cancel.is_set():
                     return item, None, "cancelled"
                 try:
-                    return item, hash_file(item[0]), None
+                    return item, describe(item[0]).tobytes(), None
                 except Exception as e:  # corrupt/unsupported file
                     return item, None, str(e)
 
             done = 0
             with ThreadPoolExecutor(max_workers=min(8, (os.cpu_count() or 2))) as pool:
-                for item, hashes, err in pool.map(work, todo):
+                for item, desc, err in pool.map(work, todo):
                     done += 1
-                    if hashes:
+                    if desc:
                         with self._lock:
                             self._db.execute(
-                                "INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?)",
-                                (item[0], folder, item[1], item[2], hashes[0], hashes[1]),
+                                "INSERT OR REPLACE INTO files VALUES (?,?,?,?,?)",
+                                (item[0], folder, item[1], item[2], desc),
                             )
                             if done % 500 == 0:
                                 self._db.commit()
@@ -354,11 +405,11 @@ class Index:
         """Add one photo (e.g. a confirmed-new scan) outside any watched folder."""
         path = os.path.normpath(path)
         st = os.stat(path)
-        ph, dh = hash_file(path)
+        desc = describe(path).tobytes()
         with self._lock:
             self._db.execute(
-                "INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?)",
-                (path, None, st.st_size, st.st_mtime, ph, dh),
+                "INSERT OR REPLACE INTO files VALUES (?,?,?,?,?)",
+                (path, None, st.st_size, st.st_mtime, desc),
             )
             self._db.commit()
             self._cache = None
@@ -367,43 +418,42 @@ class Index:
     def _arrays(self):
         with self._lock:
             if self._cache is None:
-                rows = self._db.execute("SELECT path, ph, dh FROM files").fetchall()
+                rows = self._db.execute("SELECT path, desc FROM files").fetchall()
                 paths = [r[0] for r in rows]
-                self._cache = (paths, _arr([r[1] for r in rows]), _arr([r[2] for r in rows]))
+                n = len(rows)
+                if n:
+                    raw = np.frombuffer(b"".join(r[1] for r in rows), dtype=np.float16).reshape(n, len(DB_WINDOWS), _T * _T)
+                    views = [np.ascontiguousarray(raw[:, k, :], dtype=np.float32) for k in range(len(DB_WINDOWS))]
+                else:
+                    views = [np.zeros((0, _T * _T), np.float32) for _ in DB_WINDOWS]
+                lookup = {os.path.normcase(p): i for i, p in enumerate(paths)}
+                self._cache = (paths, views, lookup)
             return self._cache
 
     def search(self, path, top=5):
-        """Return (matches, already_indexed). matches = [(distance, path)], best first."""
-        paths, P, D = self._arrays()
-        norm = os.path.normcase(os.path.normpath(path))
-        already = any(os.path.normcase(p) == norm for p in paths)
+        """Return (matches, already_indexed). matches = [(score 0..1, path)], best first."""
+        paths, views, lookup = self._arrays()
+        own = lookup.get(os.path.normcase(os.path.normpath(path)))
         if not paths:
-            return [], already
-        best = None
-        for qp, qd in hash_file_rotations(path):
-            qp = np.frombuffer(qp, dtype=np.uint8)
-            qd = np.frombuffer(qd, dtype=np.uint8)
-            dist = _POP[P ^ qp].sum(axis=1, dtype=np.int32) + _POP[D ^ qd].sum(axis=1, dtype=np.int32)
-            best = dist if best is None else np.minimum(best, dist)
-        order = np.argsort(best, kind="stable")
-        out = []
-        for i in order:
-            if os.path.normcase(paths[i]) == norm:
-                continue
-            out.append((int(best[i]), paths[i]))
-            if len(out) >= top:
-                break
-        return out, already
+            return [], own is not None
+        V, scales, shifts = _query(path)
+        best = _best_scores(V, scales, shifts, views).copy()
+        if own is not None:
+            best[own] = -9.0  # never match a file against itself
+        k = min(top, len(best))
+        idxs = np.argpartition(-best, k - 1)[:k]
+        idxs = idxs[np.argsort(-best[idxs], kind="stable")]
+        return [(float(best[i]), paths[i]) for i in idxs if best[i] > -9.0], own is not None
 
 
-def verdict(distance, sensitivity="Normal"):
+def verdict(score, sensitivity="Normal"):
     dup, maybe = SENSITIVITY[sensitivity]
-    if distance <= dup:
+    if score >= dup:
         return "likely duplicate"
-    if distance <= maybe:
+    if score >= maybe:
         return "possible match"
     return "looks new"
 
 
-def similarity_percent(distance):
-    return max(0, round(100 * (1 - distance / 128)))
+def similarity_percent(score):
+    return max(0, min(100, round(100 * score)))

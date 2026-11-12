@@ -39,8 +39,10 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Photo Duplicate Checker")
-        self.geometry("1100x760")
-        self.minsize(900, 640)
+        w = min(1100, self.winfo_screenwidth() - 40)
+        h = min(760, self.winfo_screenheight() - 100)
+        self.geometry(f"{w}x{h}+10+10")
+        self.minsize(min(900, w), min(640, h))
         self.index = core.Index()
         self.q = queue.Queue()
         self.cancel = threading.Event()

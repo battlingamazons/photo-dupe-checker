@@ -62,6 +62,154 @@ def thumbnail(path, size=THUMB):
     return ImageTk.PhotoImage(img)
 
 
+class CropDialog(tk.Toplevel):
+    """Drag a rectangle over the scan; result = (l, t, r, b) fractions, or None if cancelled."""
+
+    MAXW, MAXH, GRAB = 820, 520, 10
+
+    def __init__(self, parent, path, initial=None):
+        super().__init__(parent)
+        self.title("Crop the scan - drag over the part that is the photo")
+        self.transient(parent)
+        self.result = None
+        self.done = False
+        img = core.load_image(path, max_side=1200).convert("RGB")
+        self.full = img
+        sc = min(self.MAXW / img.width, self.MAXH / img.height, 1.0)
+        self.dw, self.dh = max(1, int(img.width * sc)), max(1, int(img.height * sc))
+        self.photo = ImageTk.PhotoImage(img.resize((self.dw, self.dh)))
+        ttk.Label(self, text="Drag on the picture to select the photo itself (leave out blank paper, scanner edges, etc.). "
+                  "Drag the edges or inside the box to adjust it.", wraplength=self.MAXW).pack(padx=10, pady=(10, 4))
+        self.canvas = tk.Canvas(self, width=self.dw, height=self.dh, highlightthickness=1, cursor="crosshair")
+        self.canvas.pack(padx=10, pady=4)
+        self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
+        self.rect = None      # (x0, y0, x1, y1) in canvas pixels
+        self.shade = []
+        self.outline = None
+        bar = ttk.Frame(self)
+        bar.pack(fill="x", padx=10, pady=(4, 10))
+        self.btn_ok = ttk.Button(bar, text="Check this part", command=self.accept, state="disabled")
+        self.btn_ok.pack(side="right")
+        ttk.Button(bar, text="Cancel", command=self.cancel).pack(side="right", padx=6)
+        ttk.Button(bar, text="Auto-trim blank edges", command=self.auto).pack(side="left")
+        ttk.Button(bar, text="Reset", command=lambda: self.set_fractions(None)).pack(side="left", padx=6)
+        self.canvas.bind("<ButtonPress-1>", self._press)
+        self.canvas.bind("<B1-Motion>", self._drag)
+        self.canvas.bind("<ButtonRelease-1>", self._release)
+        self.protocol("WM_DELETE_WINDOW", self.cancel)
+        self.mode = None
+        if initial:
+            self.set_fractions(initial)
+        else:
+            self.auto(quiet=True)
+        try:
+            self.grab_set()
+        except tk.TclError:
+            pass
+
+    # --- rectangle <-> fractions
+    def set_fractions(self, fr):
+        if not fr:
+            self.rect = None
+        else:
+            l, t, r, b = fr
+            self.rect = (l * self.dw, t * self.dh, r * self.dw, b * self.dh)
+        self._draw()
+
+    def fractions(self):
+        if not self.rect:
+            return None
+        x0, y0, x1, y1 = self.rect
+        return (x0 / self.dw, y0 / self.dh, x1 / self.dw, y1 / self.dh)
+
+    def auto(self, quiet=False):
+        box = core.content_box(self.full)
+        if box:
+            self.set_fractions(box)
+        elif not quiet:
+            messagebox.showinfo("Auto-trim", "No blank edges found - drag a box by hand instead.", parent=self)
+
+    def _draw(self):
+        c = self.canvas
+        for i in self.shade:
+            c.delete(i)
+        self.shade = []
+        if self.outline:
+            c.delete(self.outline)
+            self.outline = None
+        if not self.rect:
+            self.btn_ok.config(state="disabled")
+            return
+        x0, y0, x1, y1 = self.rect
+        for box in ((0, 0, self.dw, y0), (0, y1, self.dw, self.dh), (0, y0, x0, y1), (x1, y0, self.dw, y1)):
+            self.shade.append(c.create_rectangle(*box, fill="black", stipple="gray50", outline=""))
+        self.outline = c.create_rectangle(x0, y0, x1, y1, outline="#00a0ff", width=2)
+        ok = (x1 - x0) >= 12 and (y1 - y0) >= 12
+        self.btn_ok.config(state="normal" if ok else "disabled")
+
+    # --- mouse
+    def _clamp(self, x, y):
+        return min(max(x, 0), self.dw), min(max(y, 0), self.dh)
+
+    def _press(self, e):
+        x, y = self._clamp(e.x, e.y)
+        self.start = (x, y)
+        self.mode = None
+        if self.rect:
+            x0, y0, x1, y1 = self.rect
+            g = self.GRAB
+            if x0 - g <= x <= x1 + g and y0 - g <= y <= y1 + g:
+                edges = (abs(x - x0) <= g, abs(x - x1) <= g, abs(y - y0) <= g, abs(y - y1) <= g)
+                if any(edges):
+                    self.mode = ("edge", edges)
+                else:
+                    self.mode = ("move", self.rect)
+        if not self.mode:
+            self.mode = ("new", None)
+            self.rect = (x, y, x, y)
+        self._draw()
+
+    def _drag(self, e):
+        if not self.mode:
+            return
+        x, y = self._clamp(e.x, e.y)
+        kind, data = self.mode
+        if kind == "new":
+            sx, sy = self.start
+            self.rect = (min(sx, x), min(sy, y), max(sx, x), max(sy, y))
+        elif kind == "edge":
+            x0, y0, x1, y1 = self.rect
+            L, R, T, B = data
+            if L:
+                x0 = min(x, x1 - 1)
+            if R:
+                x1 = max(x, x0 + 1)
+            if T:
+                y0 = min(y, y1 - 1)
+            if B:
+                y1 = max(y, y0 + 1)
+            self.rect = (x0, y0, x1, y1)
+        else:
+            x0, y0, x1, y1 = data
+            dx = min(max(x - self.start[0], -x0), self.dw - x1)
+            dy = min(max(y - self.start[1], -y0), self.dh - y1)
+            self.rect = (x0 + dx, y0 + dy, x1 + dx, y1 + dy)
+        self._draw()
+
+    def _release(self, e):
+        self.mode = None
+
+    def accept(self):
+        self.result = self.fractions()
+        self.done = True
+        self.destroy()
+
+    def cancel(self):
+        self.result = None
+        self.done = True
+        self.destroy()
+
+
 class App(_Base):
     def __init__(self, index=None):
         super().__init__()
@@ -82,6 +230,7 @@ class App(_Base):
         self.cancel = threading.Event()
         self.busy = False
         self.query_path = None
+        self.query_crop = None
         self.searching = False
         self._search_token = 0
         self._images = []
@@ -176,6 +325,8 @@ class App(_Base):
         self.sens.set("Generous")
         self.sens.pack(side="left")
         self.sens.bind("<<ComboboxSelected>>", lambda e: self.matches and self.show_results())
+        self.btn_crop = ttk.Button(mid, text="Crop...", command=self.crop, state="disabled")
+        self.btn_crop.pack(side="left", padx=(24, 0))
         self.btn_addfile = ttk.Button(mid, text="Add this photo to the collection", command=self.add_current, state="disabled")
         self.btn_addfile.pack(side="right", padx=8)
 
@@ -285,7 +436,20 @@ class App(_Base):
         if path:
             self.check_path(path)
 
-    def check_path(self, path):
+    def crop(self):
+        """Let the user mark just the photo part of the scan, then check that part."""
+        if not self.query_path or self.searching or self.busy:
+            return
+        try:
+            dlg = CropDialog(self, self.query_path, self.query_crop)
+        except Exception as e:  # noqa: BLE001
+            messagebox.showerror("Could not open the scan", str(e))
+            return
+        self.wait_window(dlg)
+        if dlg.result:
+            self.check_path(self.query_path, crop=dlg.result)
+
+    def check_path(self, path, crop=None):
         """Compare one photo (chosen or dropped) against the index and show the result."""
         if not core.is_image(path):
             messagebox.showinfo("Not a supported photo", f"{os.path.basename(path)} is not a photo or scan type this program can read.")
@@ -300,17 +464,19 @@ class App(_Base):
             messagebox.showinfo("Still checking", "Please wait a moment - the previous photo is still being checked.")
             return
         self.query_path = path
+        self.query_crop = crop
         self.searching = True
         self._search_token += 1
         token = self._search_token
         self.btn_check.config(state="disabled")
+        self.btn_crop.config(state="disabled")
         self.btn_addfile.config(state="disabled")
         self.verdict_label.config(fg="black")
         self.verdict.set(f"Checking {os.path.basename(path)} against {self.index.count():,} photos...")
 
         def run():
             try:
-                m, already = self.index.search(path, top=5)
+                m, already = self.index.search(path, top=5, crop=crop)
                 self.q.put(("search_done", token, m, already))
             except Exception as e:  # noqa: BLE001
                 self.q.put(("search_error", token, str(e)))
@@ -321,6 +487,7 @@ class App(_Base):
         if token != self._search_token:
             return
         self.searching = False
+        self.btn_crop.config(state="normal")
         if not self.busy:
             self.btn_check.config(state="normal")
         if error:
@@ -350,12 +517,18 @@ class App(_Base):
             "check closest": "Probably new - but the closest photos below are worth a quick look (a badly worn copy can score low)",
             "looks new": "Looks new - no close match found",
         }[v]
+        if v in ("looks new", "check closest") and not self.query_crop:
+            try:
+                if core.content_box(self._pil(self.query_path)):
+                    text += "\nThis scan has blank space around the photo - click Crop... to check just the photo."
+            except Exception:  # noqa: BLE001
+                pass
         if self.already:
             text += "   (this exact file is already in the index)"
         self.verdict.set(text)
         self.verdict_label.config(fg=COLORS[v])
         self.btn_addfile.config(state="normal" if not self.already else "disabled")
-        self._cards = [("THIS SCAN", self.query_path)] + [
+        self._cards = [("THIS SCAN" + (" (cropped)" if self.query_crop else ""), self.query_path)] + [
             (f"{core.similarity_percent(score)}% similar - {core.verdict(score, sens)}", path)
             for score, path in self.matches[:4]
         ]
@@ -408,6 +581,8 @@ class App(_Base):
         ttk.Label(f, text=heading, font=("Segoe UI", 10, "bold"), wraplength=t, justify="center").pack()
         try:
             img = self._pil(path).copy()
+            if is_query:
+                img = core.crop_image(img, self.query_crop)
             img.thumbnail((t, t))
             photo = ImageTk.PhotoImage(img)
             self._images.append(photo)
@@ -503,6 +678,32 @@ def selftest(out_path):
 
         fits()
         msgs.append("layout fits")
+        # crop dialog: draw a box with real mouse events, accept, and re-check the cropped part
+        dlg = CropDialog(app, spaced)
+        dlg.update()
+        dlg.set_fractions(None)
+        dlg.canvas.event_generate("<ButtonPress-1>", x=10, y=10)
+        dlg.canvas.event_generate("<B1-Motion>", x=dlg.dw // 2, y=dlg.dh // 2)
+        dlg.canvas.event_generate("<ButtonRelease-1>", x=dlg.dw // 2, y=dlg.dh // 2)
+        dlg.update()
+        fr = dlg.fractions()
+        assert fr and 0.4 < fr[2] < 0.6, fr
+        dlg.accept()
+        assert dlg.result == fr
+        app.check_path(spaced, crop=fr)
+        t0 = time.time()
+        while time.time() - t0 < 60 and app.searching:
+            app.update()
+            time.sleep(0.05)
+        app.update()
+        assert app.query_crop == fr and app.matches, "cropped check failed"
+        msgs.append("crop ok")
+        app.check_path(spaced)
+        t0 = time.time()
+        while time.time() - t0 < 60 and app.searching:
+            app.update()
+            time.sleep(0.05)
+        app.update()
         app.geometry("900x640")
         app.update()
         fits()

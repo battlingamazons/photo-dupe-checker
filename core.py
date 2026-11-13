@@ -263,8 +263,36 @@ def strip_frame(a):
     return out
 
 
-def _prep(path):
-    g = load_image(path).convert("L").resize((_SZ, _SZ), Image.LANCZOS)
+def crop_image(img, crop):
+    """crop = (left, top, right, bottom) as fractions 0..1 of the picture; None = whole picture."""
+    if not crop:
+        return img
+    w, h = img.size
+    l, t, r, b = (min(max(float(v), 0.0), 1.0) for v in crop)
+    box = (int(round(l * w)), int(round(t * h)), int(round(r * w)), int(round(b * h)))
+    if box[2] - box[0] < 8 or box[3] - box[1] < 8:
+        return img
+    return img.crop(box)
+
+
+def content_box(img, blank_hi=235, blank_lo=20, min_frac=0.02):
+    """Fractions (l, t, r, b) of the area that is not plain white / scanner-black margin.
+    None when there is nothing worth trimming."""
+    g = np.asarray(img.convert("L").copy().resize((min(img.size[0], 400), min(img.size[1], 400))), np.uint8)
+    ink = (g < blank_hi) & (g > blank_lo)
+    rows = np.nonzero(ink.mean(axis=1) > min_frac)[0]
+    cols = np.nonzero(ink.mean(axis=0) > min_frac)[0]
+    if len(rows) < 8 or len(cols) < 8:
+        return None
+    h, w = g.shape
+    box = (cols[0] / w, rows[0] / h, (cols[-1] + 1) / w, (rows[-1] + 1) / h)
+    if box[0] < 0.02 and box[1] < 0.02 and box[2] > 0.98 and box[3] > 0.98:
+        return None
+    return box
+
+
+def _prep(path, crop=None):
+    g = crop_image(load_image(path, max_side=1600 if crop else 512), crop).convert("L").resize((_SZ, _SZ), Image.LANCZOS)
     return np.pad(strip_frame(np.asarray(g, dtype=np.float32)), _PAD, mode="edge")
 
 
@@ -291,9 +319,9 @@ def describe(path):
     return np.stack([_window(P, s, 0, 0) for s in DB_WINDOWS]).astype(np.float16)
 
 
-def _query(path):
+def _query(path, crop=None):
     """All the positions a new scan is tried at (4 rotations x zooms x shifts)."""
-    P = _prep(path)
+    P = _prep(path, crop)
     vs, scales, shifts = [], [], []
     for rot in range(4):
         Pr = np.rot90(P, rot)
@@ -484,13 +512,13 @@ class Index:
                 self._cache = (paths, views, lookup)
             return self._cache
 
-    def search(self, path, top=5):
+    def search(self, path, top=5, crop=None):
         """Return (matches, already_indexed). matches = [(score 0..1, path)], best first."""
         paths, views, lookup = self._arrays()
         own = lookup.get(os.path.normcase(os.path.normpath(path)))
         if not paths:
             return [], own is not None
-        V, scales, shifts = _query(path)
+        V, scales, shifts = _query(path, crop)
         best = _best_scores(V, scales, shifts, views).copy()
         if own is not None:
             best[own] = -9.0  # never match a file against itself

@@ -212,3 +212,34 @@ def test_strip_frame_removes_flat_border_but_keeps_picture():
     assert out[:3, 20:70].min() > 20 or np.all(framed[3, 20:70] <= 20)  # no dark band left
     assert np.allclose(out[30:60, 30:60], framed[30:60, 30:60])  # picture untouched
     assert np.allclose(core.strip_frame(img)[10:86, 10:86], img[10:86, 10:86])  # no frame: unchanged centre
+
+
+def _white_below(im, frac):
+    """Scan that includes a big blank strip under the photo (photo not cropped)."""
+    w, h = im.size
+    out = Image.new("RGB", (w, int(h * (1 + frac))), (248, 248, 246))
+    out.paste(im, (0, 0))
+    return out
+
+
+@pytest.mark.parametrize("frac", [0.5, 1.0])
+def test_big_white_strip_is_found_after_crop(frac, library):
+    idx, tmp = library
+    scan = _white_below(fade(make_photo(3)), frac)
+    p = str(tmp / f"strip{frac}.png")
+    scan.save(p)
+    box = core.content_box(scan)
+    assert box is not None and box[3] < 1 / (1 + frac) + 0.03, box
+    matches, _ = idx.search(p, crop=box)
+    assert matches[0][1].endswith("p3.png"), matches[:2]
+    assert matches[0][0] >= POSSIBLE, matches[0]
+
+
+def test_crop_image_and_content_box():
+    im = Image.new("RGB", (200, 100), (250, 250, 250))
+    im.paste(Image.new("RGB", (100, 50), (90, 60, 30)), (20, 10))
+    box = core.content_box(im)
+    assert box and abs(box[0] - 0.1) < 0.03 and abs(box[3] - 0.6) < 0.03, box
+    assert core.crop_image(im, (0.1, 0.1, 0.6, 0.6)).size == (100, 50)
+    assert core.crop_image(im, None) is im
+    assert core.content_box(Image.new("RGB", (100, 100), (120, 90, 60))) is None

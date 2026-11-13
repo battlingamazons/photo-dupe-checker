@@ -21,7 +21,7 @@ except Exception:  # noqa: BLE001
     DND_FILES, _Base = None, tk.Tk
 
 THUMB = 220
-COLORS = {"likely duplicate": "#b00020", "possible match": "#b26a00", "check closest": "#44546a", "looks new": "#1b7f3b"}
+COLORS = {"exact": "#b00020", "likely duplicate": "#b00020", "possible match": "#b26a00", "check closest": "#44546a", "looks new": "#1b7f3b"}
 
 
 def resource_path(name):
@@ -230,7 +230,7 @@ class App(_Base):
         self.geometry(f"{w}x{h}+10+10")
         self.minsize(min(900, w), min(640, h))
         self.index = index or core.Index()
-        self.matches, self.already = [], False
+        self.matches, self.already, self.exact = [], False, []
         self.q = queue.Queue()
         self.cancel = threading.Event()
         self.busy = False
@@ -428,7 +428,7 @@ class App(_Base):
                     self._set_busy(False)
                     messagebox.showerror("Problem while indexing", msg[1])
                 elif msg[0] == "search_done":
-                    self._search_finished(msg[1], msg[2], msg[3], crop=msg[4], auto=msg[5])
+                    self._search_finished(msg[1], msg[2], msg[3], crop=msg[4], auto=msg[5], exact=msg[6])
                 elif msg[0] == "search_error":
                     self._search_finished(msg[1], [], False, error=msg[2])
         except queue.Empty:
@@ -510,14 +510,16 @@ class App(_Base):
                 if use is None and auto:
                     use = core.auto_crop(path)
                     was_auto = use is not None
-                m, already = self.index.search(path, top=5, crop=use, also_whole=was_auto)
-                self.q.put(("search_done", token, m, already, use, was_auto))
+                exact = self.index.find_exact(path)
+                m, already = self.index.search(path, top=5 + len(exact), crop=use, also_whole=was_auto)
+                m = [x for x in m if x[1] not in exact][:5]
+                self.q.put(("search_done", token, m, already, use, was_auto, exact))
             except Exception as e:  # noqa: BLE001
                 self.q.put(("search_error", token, str(e)))
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _search_finished(self, token, matches, already, error=None, crop=None, auto=False):
+    def _search_finished(self, token, matches, already, error=None, crop=None, auto=False, exact=()):
         if token != self._search_token:
             return
         self.searching = False
@@ -528,7 +530,7 @@ class App(_Base):
             self.verdict.set("Could not read that photo.")
             messagebox.showerror("Could not read that photo", error)
             return
-        self.matches, self.already = matches, already
+        self.matches, self.already, self.exact = matches, already, list(exact)
         self.query_crop, self.query_auto = crop, auto
         self.show_results()
 
@@ -536,17 +538,20 @@ class App(_Base):
     def show_results(self):
         sens = self.sens.get()
         self._pil_cache = {k: v for k, v in self._pil_cache.items() if k == self.query_path}
-        if not self.matches:
+        if not self.matches and not self.exact:
             for w in self.results.winfo_children():
                 w.destroy()
             self._cards = []
             self.verdict.set("No other photos in the index to compare against.")
             return
-        top = self.matches[0][0]
+        top = self.matches[0][0] if self.matches else 0.0
         v = core.verdict(top, sens)
         if v == "looks new" and top >= core.SENSITIVITY[sens][1] - 0.10:
             v = "check closest"  # nothing convincing, but close enough that a worn copy could hide here
+        if self.exact:
+            v = "exact"
         text = {
+            "exact": "Exact copy already in the collection - the file is identical",
             "likely duplicate": "Likely already scanned",
             "possible match": "Possible match - please compare by eye",
             "check closest": "Probably new - but the closest photos below are worth a quick look (a badly worn copy can score low)",
@@ -555,12 +560,13 @@ class App(_Base):
         if self.already:
             text += "   (this exact file is already in the index)"
         self.verdict.set(text)
-        self.verdict_label.config(fg=COLORS[v])
+        self.verdict_label.config(fg=COLORS.get(v, COLORS["likely duplicate"]))
         self.btn_addfile.config(state="normal" if not self.already else "disabled")
         self._cards = [("THIS SCAN" + ((" (auto-cropped)" if self.query_auto else " (cropped)") if self.query_crop else ""), self.query_path)] + [
             (f"{core.similarity_percent(score)}% similar - {core.verdict(score, sens)}", path)
-            for score, path in self.matches[:4]
+            for score, path in self.matches[: max(1, 4 - len(self.exact[:2]))]
         ]
+        self._cards[1:1] = [("EXACT MATCH - identical file", p) for p in self.exact[:2]]
         self._layout_cards()
 
     def _on_results_resize(self, event):
@@ -692,6 +698,9 @@ def selftest(out_path):
         app.update()
         assert app.query_path == spaced and app.matches, "drop did not trigger a check"
         assert app.matches[0][0] >= 0.9, app.matches[:1]
+        assert [os.path.basename(p) for p in app.exact] == ["x.png"], app.exact  # byte-identical copy
+        assert app._cards[1][0].startswith("EXACT MATCH"), app._cards[:2]
+        msgs.append("exact ok")
         msgs.append("drop ok")
 
         def fits():

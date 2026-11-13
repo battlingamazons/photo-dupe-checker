@@ -3,6 +3,7 @@
 No GUI code lives here so it can be tested without a display.
 """
 import os
+import hashlib
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -59,6 +60,15 @@ SENSITIVITY = {
     "Generous": (0.75, 0.60),
 }
 SCHEMA_VERSION = 5
+
+
+def file_hash(path):
+    """SHA-256 of the file's bytes: identical files (copies) give identical hashes."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def default_db_path():
@@ -382,10 +392,13 @@ class Index:
             """
             CREATE TABLE IF NOT EXISTS files (
                 path TEXT PRIMARY KEY, folder TEXT, size INTEGER, mtime REAL,
-                desc BLOB NOT NULL);
+                desc BLOB NOT NULL, sha TEXT);
             CREATE INDEX IF NOT EXISTS files_folder ON files(folder);
             """
         )
+        if "sha" not in [r[1] for r in self._db.execute("PRAGMA table_info(files)")]:
+            self._db.execute("ALTER TABLE files ADD COLUMN sha TEXT")  # index made before exact matching
+        self._db.execute("CREATE INDEX IF NOT EXISTS files_sha ON files(sha)")
         self._db.commit()
         self._cache = None
 
@@ -427,13 +440,12 @@ class Index:
                 summary["unavailable"].append(folder)
                 continue
             with self._lock:
-                known = {
-                    p: (s, m)
-                    for p, s, m in self._db.execute(
-                        "SELECT path, size, mtime FROM files WHERE folder = ?", (folder,)
-                    )
-                }
-            seen, todo = set(), []
+                rows = self._db.execute(
+                    "SELECT path, size, mtime, sha FROM files WHERE folder = ?", (folder,)
+                ).fetchall()
+                known = {p: (s, m) for p, s, m, _h in rows}
+                unhashed = {p for p, _s, _m, h in rows if h is None}
+            seen, todo, backfill = set(), [], []
             for root, _dirs, names in os.walk(folder):
                 for name in names:
                     if not is_image(name):
@@ -446,6 +458,8 @@ class Index:
                     seen.add(p)
                     if known.get(p) == (st.st_size, st.st_mtime):
                         summary["skipped"] += 1
+                        if p in unhashed:
+                            backfill.append(p)
                     else:
                         todo.append((p, st.st_size, st.st_mtime))
                 if cancel and cancel.is_set():
@@ -461,7 +475,7 @@ class Index:
                 if cancel and cancel.is_set():
                     return item, None, "cancelled"
                 try:
-                    return item, describe(item[0]).tobytes(), None
+                    return item, (describe(item[0]).tobytes(), file_hash(item[0])), None
                 except Exception as e:  # corrupt/unsupported file
                     return item, None, str(e)
 
@@ -472,8 +486,8 @@ class Index:
                     if desc:
                         with self._lock:
                             self._db.execute(
-                                "INSERT OR REPLACE INTO files VALUES (?,?,?,?,?)",
-                                (item[0], folder, item[1], item[2], desc),
+                                "INSERT OR REPLACE INTO files (path, folder, size, mtime, desc, sha) VALUES (?,?,?,?,?,?)",
+                                (item[0], folder, item[1], item[2], desc[0], desc[1]),
                             )
                             if done % 500 == 0:
                                 self._db.commit()
@@ -482,6 +496,21 @@ class Index:
                         summary["failed"].append((item[0], err))
                     if progress:
                         progress(done, len(todo), folder)
+            # files indexed before exact matching existed only need their hash worked out
+            def hash_only(p):
+                if cancel and cancel.is_set():
+                    return p, None
+                try:
+                    return p, file_hash(p)
+                except OSError:
+                    return p, None
+
+            if backfill:
+                with ThreadPoolExecutor(max_workers=min(8, (os.cpu_count() or 2))) as pool:
+                    for p, h in pool.map(hash_only, backfill):
+                        if h:
+                            with self._lock:
+                                self._db.execute("UPDATE files SET sha = ? WHERE path = ?", (h, p))
             with self._lock:
                 self._db.commit()
                 self._cache = None
@@ -492,15 +521,24 @@ class Index:
         path = os.path.normpath(path)
         st = os.stat(path)
         desc = describe(path).tobytes()
+        sha = file_hash(path)
         with self._lock:
             self._db.execute(
-                "INSERT OR REPLACE INTO files VALUES (?,?,?,?,?)",
-                (path, None, st.st_size, st.st_mtime, desc),
+                "INSERT OR REPLACE INTO files (path, folder, size, mtime, desc, sha) VALUES (?,?,?,?,?,?)",
+                (path, None, st.st_size, st.st_mtime, desc, sha),
             )
             self._db.commit()
             self._cache = None
 
     # ---- searching ----
+    def find_exact(self, path):
+        """Indexed files whose bytes are identical to this file (same SHA-256), other than itself."""
+        me = os.path.normcase(os.path.normpath(path))
+        sha = file_hash(path)
+        with self._lock:
+            rows = self._db.execute("SELECT path FROM files WHERE sha = ?", (sha,)).fetchall()
+        return [p for (p,) in rows if os.path.normcase(p) != me and os.path.exists(p)]
+
     def _arrays(self):
         with self._lock:
             if self._cache is None:

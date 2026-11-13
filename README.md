@@ -30,6 +30,10 @@ install/run/uninstall) and publishes the MSI on the Releases page. Every push to
 3b. Blank paper or scanner background around the photo is cropped away automatically (the result is
    labelled "auto-cropped"; the whole scan is also tried, so nothing is lost). Click **Crop...** to
    see the box, drag its edges or draw a new one, and **Check this part** to re-run the search on it.
+3c. If a byte-for-byte identical file (same SHA-256 hash) is already in the collection, the verdict says
+   "Exact copy already in the collection" and that file is shown first as **EXACT MATCH**. Photos indexed by an
+   older version get their hash filled in by the next **Rescan folders** (it only reads the files, no re-analysis).
+   A re-scan or re-saved copy is never byte-identical, so those are still found by the look-alike matching.
 4. If it really is new, **Add this photo to the collection** (or just save it
    into a watched folder and rescan).
 

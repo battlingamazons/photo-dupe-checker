@@ -267,3 +267,23 @@ def test_white_strip_found_automatically(frac, library):
     assert box is not None
     m = idx.search(p, crop=box, also_whole=True)[0]
     assert m[0][1].endswith("p5.png") and m[0][0] >= DUP, m[0]
+
+
+def test_exact_copy_is_found_by_hash(tmp_path):
+    import shutil, sqlite3
+    from PIL import Image
+    rng = np.random.default_rng(5)
+    a = tmp_path / "lib"; a.mkdir()
+    for i in range(3):
+        Image.fromarray(rng.integers(0, 255, (120, 90, 3), dtype=np.uint8)).save(a / f"p{i}.png")
+    idx = core.Index(tmp_path / "i.db"); idx.add_folder(str(a)); idx.rescan()
+    copy = tmp_path / "copy_of_p1.png"; shutil.copy(a / "p1.png", copy)
+    assert [os.path.basename(p) for p in idx.find_exact(str(copy))] == ["p1.png"]
+    other = tmp_path / "other.png"
+    Image.fromarray(rng.integers(0, 255, (120, 90, 3), dtype=np.uint8)).save(other)
+    assert idx.find_exact(str(other)) == []
+    assert idx.find_exact(str(a / "p1.png")) == []  # not itself
+    # an index made before hashes existed gets them on the next rescan
+    db = sqlite3.connect(tmp_path / "i.db"); db.execute("UPDATE files SET sha = NULL"); db.commit(); db.close()
+    idx2 = core.Index(tmp_path / "i.db"); idx2.rescan()
+    assert [os.path.basename(p) for p in idx2.find_exact(str(copy))] == ["p1.png"]

@@ -102,10 +102,15 @@ class CropDialog(tk.Toplevel):
             self.set_fractions(initial)
         else:
             self.auto(quiet=True)
+        self.bind("<Return>", lambda e: self.accept() if self.rect and self.btn_ok.instate(["!disabled"]) else None)
+        self.bind("<Escape>", lambda e: self.cancel())
         try:
             self.grab_set()
         except tk.TclError:
             pass
+        self.lift()
+        self.focus_force()
+        self.btn_ok.focus_set()
 
     # --- rectangle <-> fractions
     def set_fractions(self, fr):
@@ -517,7 +522,7 @@ class App(_Base):
             "check closest": "Probably new - but the closest photos below are worth a quick look (a badly worn copy can score low)",
             "looks new": "Looks new - no close match found",
         }[v]
-        if v in ("looks new", "check closest") and not self.query_crop:
+        if v != "likely duplicate" and not self.query_crop:
             try:
                 if core.content_box(self._pil(self.query_path)):
                     text += "\nThis scan has blank space around the photo - click Crop... to check just the photo."

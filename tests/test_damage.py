@@ -243,3 +243,27 @@ def test_crop_image_and_content_box():
     assert core.crop_image(im, (0.1, 0.1, 0.6, 0.6)).size == (100, 50)
     assert core.crop_image(im, None) is im
     assert core.content_box(Image.new("RGB", (100, 100), (120, 90, 60))) is None
+
+
+@pytest.mark.parametrize("kind", DAMAGE)
+def test_automatic_crop_does_not_hurt_any_damage_kind(kind, library):
+    """What the app now does for every scan: auto-crop plus also trying the whole scan."""
+    idx, tmp = library
+    for i in (3, 17):
+        q = str(tmp / f"auto_{kind}_{i}.png")
+        DAMAGE[kind](make_photo(i)).save(q)
+        plain = idx.search(q)[0][0]
+        auto = idx.search(q, crop=core.auto_crop(q), also_whole=True)[0][0]
+        assert auto[1].endswith(f"p{i}.png") and auto[0] >= POSSIBLE, (kind, i, auto)
+        assert auto[0] >= plain[0] - 1e-6, (kind, i, plain, auto)  # never worse than before
+
+
+@pytest.mark.parametrize("frac", [0.15, 0.5, 1.0])
+def test_white_strip_found_automatically(frac, library):
+    idx, tmp = library
+    p = str(tmp / f"autostrip{frac}.png")
+    _white_below(fade(make_photo(5)), frac).save(p)
+    box = core.auto_crop(p)
+    assert box is not None
+    m = idx.search(p, crop=box, also_whole=True)[0]
+    assert m[0][1].endswith("p5.png") and m[0][0] >= DUP, m[0]

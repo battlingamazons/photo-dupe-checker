@@ -78,8 +78,8 @@ class CropDialog(tk.Toplevel):
         sc = min(self.MAXW / img.width, self.MAXH / img.height, 1.0)
         self.dw, self.dh = max(1, int(img.width * sc)), max(1, int(img.height * sc))
         self.photo = ImageTk.PhotoImage(img.resize((self.dw, self.dh)))
-        ttk.Label(self, text="Drag on the picture to select the photo itself (leave out blank paper, scanner edges, etc.). "
-                  "Drag the edges or inside the box to adjust it.", wraplength=self.MAXW).pack(padx=10, pady=(10, 4))
+        ttk.Label(self, text="The box was placed automatically around the photo. Drag its edges (or the box itself) to adjust it, "
+                  "or drag a new box. Then click Check this part.", wraplength=self.MAXW).pack(padx=10, pady=(10, 4))
         self.canvas = tk.Canvas(self, width=self.dw, height=self.dh, highlightthickness=1, cursor="crosshair")
         self.canvas.pack(padx=10, pady=4)
         self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
@@ -92,7 +92,7 @@ class CropDialog(tk.Toplevel):
         self.btn_ok.pack(side="right")
         ttk.Button(bar, text="Cancel", command=self.cancel).pack(side="right", padx=6)
         ttk.Button(bar, text="Auto-trim blank edges", command=self.auto).pack(side="left")
-        ttk.Button(bar, text="Reset", command=lambda: self.set_fractions(None)).pack(side="left", padx=6)
+        ttk.Button(bar, text="Whole scan", command=lambda: self.set_fractions((0, 0, 1, 1))).pack(side="left", padx=6)
         self.canvas.bind("<ButtonPress-1>", self._press)
         self.canvas.bind("<B1-Motion>", self._drag)
         self.canvas.bind("<ButtonRelease-1>", self._release)
@@ -236,6 +236,7 @@ class App(_Base):
         self.busy = False
         self.query_path = None
         self.query_crop = None
+        self.query_auto = False
         self.searching = False
         self._search_token = 0
         self._images = []
@@ -408,7 +409,7 @@ class App(_Base):
                     self._set_busy(False)
                     messagebox.showerror("Problem while indexing", msg[1])
                 elif msg[0] == "search_done":
-                    self._search_finished(msg[1], msg[2], msg[3])
+                    self._search_finished(msg[1], msg[2], msg[3], crop=msg[4], auto=msg[5])
                 elif msg[0] == "search_error":
                     self._search_finished(msg[1], [], False, error=msg[2])
         except queue.Empty:
@@ -452,9 +453,13 @@ class App(_Base):
             return
         self.wait_window(dlg)
         if dlg.result:
-            self.check_path(self.query_path, crop=dlg.result)
+            l, t, r, b = dlg.result
+            if l <= 0.01 and t <= 0.01 and r >= 0.99 and b >= 0.99:
+                self.check_path(self.query_path, auto=False)  # user chose the whole scan
+            else:
+                self.check_path(self.query_path, crop=dlg.result, auto=False)
 
-    def check_path(self, path, crop=None):
+    def check_path(self, path, crop=None, auto=True):
         """Compare one photo (chosen or dropped) against the index and show the result."""
         if not core.is_image(path):
             messagebox.showinfo("Not a supported photo", f"{os.path.basename(path)} is not a photo or scan type this program can read.")
@@ -469,7 +474,8 @@ class App(_Base):
             messagebox.showinfo("Still checking", "Please wait a moment - the previous photo is still being checked.")
             return
         self.query_path = path
-        self.query_crop = crop
+        self.query_crop = None
+        self.query_auto = False
         self.searching = True
         self._search_token += 1
         token = self._search_token
@@ -481,14 +487,18 @@ class App(_Base):
 
         def run():
             try:
-                m, already = self.index.search(path, top=5, crop=crop)
-                self.q.put(("search_done", token, m, already))
+                use, was_auto = crop, False
+                if use is None and auto:
+                    use = core.auto_crop(path)
+                    was_auto = use is not None
+                m, already = self.index.search(path, top=5, crop=use, also_whole=was_auto)
+                self.q.put(("search_done", token, m, already, use, was_auto))
             except Exception as e:  # noqa: BLE001
                 self.q.put(("search_error", token, str(e)))
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _search_finished(self, token, matches, already, error=None):
+    def _search_finished(self, token, matches, already, error=None, crop=None, auto=False):
         if token != self._search_token:
             return
         self.searching = False
@@ -500,6 +510,7 @@ class App(_Base):
             messagebox.showerror("Could not read that photo", error)
             return
         self.matches, self.already = matches, already
+        self.query_crop, self.query_auto = crop, auto
         self.show_results()
 
     # ---------- results ----------
@@ -522,18 +533,12 @@ class App(_Base):
             "check closest": "Probably new - but the closest photos below are worth a quick look (a badly worn copy can score low)",
             "looks new": "Looks new - no close match found",
         }[v]
-        if v != "likely duplicate" and not self.query_crop:
-            try:
-                if core.content_box(self._pil(self.query_path)):
-                    text += "\nThis scan has blank space around the photo - click Crop... to check just the photo."
-            except Exception:  # noqa: BLE001
-                pass
         if self.already:
             text += "   (this exact file is already in the index)"
         self.verdict.set(text)
         self.verdict_label.config(fg=COLORS[v])
         self.btn_addfile.config(state="normal" if not self.already else "disabled")
-        self._cards = [("THIS SCAN" + (" (cropped)" if self.query_crop else ""), self.query_path)] + [
+        self._cards = [("THIS SCAN" + ((" (auto-cropped)" if self.query_auto else " (cropped)") if self.query_crop else ""), self.query_path)] + [
             (f"{core.similarity_percent(score)}% similar - {core.verdict(score, sens)}", path)
             for score, path in self.matches[:4]
         ]
@@ -681,6 +686,25 @@ def selftest(out_path):
                 assert c.winfo_x() >= 0 and c.winfo_x() + c.winfo_width() <= rw + 2, ("card sticks out sideways", rw, c.winfo_x(), c.winfo_width())
                 assert c.winfo_y() >= 0 and c.winfo_y() + c.winfo_height() <= rh + 2, ("card sticks out below", rh, c.winfo_y(), c.winfo_height())
 
+        # a scan with a big blank strip under the photo is cropped automatically
+        strip = os.path.join(d, "strip scan.png")
+        tall = Image.new("RGB", (400, 600), (248, 248, 246))
+        tall.paste(base, (0, 0))
+        tall.save(strip)
+        app.check_path(strip)
+        t0 = time.time()
+        while time.time() - t0 < 60 and (app.searching or app.query_path != strip):
+            app.update()
+            time.sleep(0.05)
+        app.update()
+        assert app.query_auto and app.query_crop and app.query_crop[3] < 0.7, (app.query_auto, app.query_crop)
+        msgs.append("auto-crop ok")
+        app.check_path(spaced)
+        t0 = time.time()
+        while time.time() - t0 < 60 and app.searching:
+            app.update()
+            time.sleep(0.05)
+        app.update()
         fits()
         msgs.append("layout fits")
         # crop dialog: draw a box with real mouse events, accept, and re-check the cropped part

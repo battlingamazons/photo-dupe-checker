@@ -291,6 +291,14 @@ def content_box(img, blank_hi=235, blank_lo=20, min_frac=0.02):
     return box
 
 
+def auto_crop(path):
+    """Where the photo itself is within a scan (blank paper / scanner background left out), or None."""
+    try:
+        return content_box(load_image(path, max_side=512))
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _prep(path, crop=None):
     g = crop_image(load_image(path, max_side=1600 if crop else 512), crop).convert("L").resize((_SZ, _SZ), Image.LANCZOS)
     return np.pad(strip_frame(np.asarray(g, dtype=np.float32)), _PAD, mode="edge")
@@ -512,13 +520,18 @@ class Index:
                 self._cache = (paths, views, lookup)
             return self._cache
 
-    def search(self, path, top=5, crop=None):
-        """Return (matches, already_indexed). matches = [(score 0..1, path)], best first."""
+    def search(self, path, top=5, crop=None, also_whole=False):
+        """Return (matches, already_indexed). matches = [(score 0..1, path)], best first.
+        crop: only look at this part of the scan. also_whole: additionally try the whole scan
+        and keep whichever fits each stored photo better (used for automatic cropping)."""
         paths, views, lookup = self._arrays()
         own = lookup.get(os.path.normcase(os.path.normpath(path)))
         if not paths:
             return [], own is not None
         V, scales, shifts = _query(path, crop)
+        if crop and also_whole:
+            V2, s2, h2 = _query(path)
+            V, scales, shifts = np.concatenate([V, V2]), np.concatenate([scales, s2]), np.concatenate([shifts, h2])
         best = _best_scores(V, scales, shifts, views).copy()
         if own is not None:
             best[own] = -9.0  # never match a file against itself

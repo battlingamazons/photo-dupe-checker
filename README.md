@@ -27,8 +27,9 @@ install/run/uninstall) and publishes the MSI on the Releases page. Every push to
 2. **Choose a scan to check...** and pick the new scan's file.
 3. Read the verdict and compare side by side. Matches are suggestions; always
    confirm by eye. Sensitivity "Generous" shows more maybes.
-3b. **Crop...** lets you drag a box around just the photo (or press *Auto-trim blank edges*) and re-check
-   only that part. Use it when the scan has a large blank area or scanner background around the photo.
+3b. Blank paper or scanner background around the photo is cropped away automatically (the result is
+   labelled "auto-cropped"; the whole scan is also tried, so nothing is lost). Click **Crop...** to
+   see the box, drag its edges or draw a new one, and **Check this part** to re-run the search on it.
 4. If it really is new, **Add this photo to the collection** (or just save it
    into a watched folder and rescan).
 

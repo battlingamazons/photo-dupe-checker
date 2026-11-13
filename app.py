@@ -318,6 +318,7 @@ class App(_Base):
         self.progress.pack(side="left", fill="x", expand=True)
         self.btn_cancel = ttk.Button(status, text="Cancel", command=self.cancel.set, state="disabled")
         self.btn_cancel.pack(side="right", padx=(8, 0))
+        ttk.Button(status, text="About & licenses", command=self.about).pack(side="right", padx=(8, 0))
         self.status = tk.StringVar()
         ttk.Label(self, textvariable=self.status).pack(fill="x", padx=10, pady=(2, 6))
 
@@ -339,10 +340,6 @@ class App(_Base):
         self.verdict = tk.StringVar(value="Add your folders above, then drag a scan onto this window to check it.")
         self.verdict_label = tk.Label(self, textvariable=self.verdict, font=("Segoe UI", 14, "bold"), anchor="w", justify="left", wraplength=1000)
         self.verdict_label.pack(fill="x", padx=12, pady=(6, 0))
-
-        foot = ttk.Frame(self)
-        foot.pack(side="bottom", fill="x", padx=10, pady=(0, 4))
-        ttk.Button(foot, text="About && licenses", command=self.about).pack(side="right")
 
         self.results = ttk.Frame(self)
         self.results.pack(fill="both", expand=True, padx=10, pady=6)

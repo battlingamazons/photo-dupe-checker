@@ -340,10 +340,32 @@ class App(_Base):
         self.verdict_label = tk.Label(self, textvariable=self.verdict, font=("Segoe UI", 14, "bold"), anchor="w", justify="left", wraplength=1000)
         self.verdict_label.pack(fill="x", padx=12, pady=(6, 0))
 
+        foot = ttk.Frame(self)
+        foot.pack(side="bottom", fill="x", padx=10, pady=(0, 4))
+        ttk.Button(foot, text="About && licenses", command=self.about).pack(side="right")
+
         self.results = ttk.Frame(self)
         self.results.pack(fill="both", expand=True, padx=10, pady=6)
         self.results.grid_propagate(False)
         self.results.bind("<Configure>", self._on_results_resize)
+
+    def about(self):
+        folder = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
+        notes = os.path.join(folder, "THIRD_PARTY_NOTICES.txt")
+        if not os.path.exists(notes):
+            notes = os.path.join(folder, "THIRD_PARTY_NOTICES.md")
+        if messagebox.askyesno(
+            "About Photo Duplicate Checker",
+            "Photo Duplicate Checker is free, open-source software (MIT license).\n"
+            "It is built with other open-source components - including GPL/LGPL libraries for HEIC and RAW "
+            "support - whose licenses are acknowledged in the notices file.\n\n"
+            "Source code: https://github.com/battlingamazons/photo-dupe-checker\n\n"
+            "Open the license notices now?",
+        ):
+            try:
+                open_path(notes)
+            except Exception as e:  # noqa: BLE001
+                messagebox.showerror("Could not open", f"{notes}\n\n{e}")
 
     # ---------- folders / indexing ----------
     def _refresh_folders(self):

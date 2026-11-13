@@ -29,6 +29,9 @@ jobs:
       - name: Build app folder
         run: pyinstaller --noconfirm --windowed --name PhotoDupeChecker --icon icon.ico --add-data "icon.ico;." --collect-all tkinterdnd2 --collect-all tifffile --collect-all imagecodecs --collect-all pillow_heif --collect-all pypdfium2 --collect-all rawpy app.py
 
+      - name: Collect license texts into the app folder
+        run: python collect_licenses.py dist/PhotoDupeChecker
+
       - name: Smoke-test the built app
         shell: pwsh
         run: |
@@ -69,6 +72,10 @@ jobs:
           $exe = "C:\Program Files\Photo Duplicate Checker\PhotoDupeChecker.exe"
           if (-not (Test-Path $exe)) { throw "Installed exe missing" }
           if (-not (Test-Path "$env:PUBLIC\Desktop\Photo Duplicate Checker.lnk")) { throw "Desktop shortcut missing" }
+          foreach ($f in "LICENSE.txt","THIRD_PARTY_NOTICES.txt","licenses\GPL-2.0.txt","licenses\LGPL-3.0.txt","licenses\python\LICENSE.txt","licenses\pillow_heif\LICENSES_bundled.txt") {
+            if (-not (Test-Path "C:\Program Files\Photo Duplicate Checker\$f")) { throw "License file missing from the install: $f" }
+          }
+          Write-Host "License files installed: $((Get-ChildItem 'C:\Program Files\Photo Duplicate Checker\licenses' -Recurse -File).Count)"
           Remove-Item selftest.txt -ErrorAction SilentlyContinue
           Start-Process -FilePath $exe -ArgumentList "--selftest","$PWD\selftest.txt" -Wait
           $r = Get-Content selftest.txt -Raw

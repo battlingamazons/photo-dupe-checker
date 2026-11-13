@@ -64,6 +64,13 @@ big-endian, and multi-page (first page is used). Also: JPEG, PNG, BMP, GIF, WebP
 JPEG 2000, TGA, PCX, PPM/PGM, PSD, ICO, AVIF, HEIC/HEIF, PDF (first page) and
 camera RAW (DNG, CR2/CR3, NEF, ARW, ORF, RW2, RAF, PEF and more).
 
+## License
+The program's own code is MIT licensed (`LICENSE`). It is built on open-source libraries, some under the
+GPL/LGPL (HEIC and RAW support); they are acknowledged in `THIRD_PARTY_NOTICES.md`, and their full license
+texts are installed in the `licenses` folder next to the program (also reachable from the **About & licenses**
+button). Because the installer bundles GPL-2.0 code, see that file for what it means and how to build a
+GPL-free installer.
+
 ## Developing
 `pip install -r requirements.txt pytest && python -m pytest`
 The Windows build is defined in `.github/workflows/build.yml`; the installer in `Package.wxs`.

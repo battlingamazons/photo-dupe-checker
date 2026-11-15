@@ -820,6 +820,20 @@ def selftest(out_path):
 if __name__ == "__main__":
     if len(sys.argv) >= 3 and sys.argv[1] == "--selftest":
         selftest(sys.argv[2])
+    elif len(sys.argv) == 3 and sys.argv[1] == "--check-index":
+        # headless diagnostic: check one photo against your real index (read-only)
+        _t = time.time()
+        _ix = core.Index()
+        print("version:", app_version(), "| photos indexed:", f"{_ix.count():,}")
+        _q = sys.argv[2]
+        _use = core.auto_crop(_q)
+        print("auto-crop of this scan:", _use)
+        print("identical files in index:", _ix.find_exact(_q))
+        _m, _own = _ix.search(_q, top=10, crop=_use, also_whole=_use is not None)
+        print("this exact file is in the index:", _own)
+        for _s, _p in _m:
+            print(f"  {_s:.3f}  {'(cropped copy) ' if _p in _ix.last_cropped else ''}{_p}")
+        print("crop check error:", _ix.crop_error, "| took", round(time.time() - _t, 1), "s")
     elif len(sys.argv) == 4 and sys.argv[1] == "--check":
         # headless diagnostic: index photo A in memory, then check photo B against it
         _ix = core.Index(":memory:")

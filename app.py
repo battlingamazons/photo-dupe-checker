@@ -47,6 +47,22 @@ THUMB_MAX, THUMB_MIN = 300, 90
 CARD_X, CARD_Y = 34, 178   # per-card horizontal / vertical overhead (borders, text, buttons)
 
 
+def find_notices():
+    """Path of the license-notices file that ships with the program (it sits in different places per platform)."""
+    here = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
+    folders = [here]
+    if getattr(sys, "frozen", False) and sys.platform == "darwin":
+        # <folder>/Photo Duplicate Checker.app/Contents/MacOS/<exe>: the notices sit next to the .app
+        folders.append(os.path.normpath(os.path.join(here, "..", "..", "..")))
+        folders.append(os.path.normpath(os.path.join(here, "..", "Resources")))
+    for f in folders:
+        for name in ("THIRD_PARTY_NOTICES.txt", "THIRD_PARTY_NOTICES.md"):
+            p = os.path.join(f, name)
+            if os.path.exists(p):
+                return p
+    return os.path.join(folders[0], "THIRD_PARTY_NOTICES.txt")
+
+
 def shorten(text, n=48):
     return text if len(text) <= n else "..." + text[-(n - 3):]
 
@@ -347,10 +363,7 @@ class App(_Base):
         self.results.bind("<Configure>", self._on_results_resize)
 
     def about(self):
-        folder = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
-        notes = os.path.join(folder, "THIRD_PARTY_NOTICES.txt")
-        if not os.path.exists(notes):
-            notes = os.path.join(folder, "THIRD_PARTY_NOTICES.md")
+        notes = find_notices()
         if messagebox.askyesno(
             "About Photo Duplicate Checker",
             "Photo Duplicate Checker is free, open-source software (MIT license).\n"

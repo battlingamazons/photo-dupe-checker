@@ -11,6 +11,7 @@ permissions:
 
 jobs:
   build:
+    name: Windows installer
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -120,9 +121,104 @@ jobs:
           path: "*.msi"
           retention-days: 90
 
-      - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: pwsh
+  mac:
+    name: Mac app (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest      # Apple Silicon (M1 and newer)
+            arch: apple-silicon
+          - os: macos-15-intel    # older Intel Macs
+            arch: intel
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest pyinstaller
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Work out version
+        id: ver
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then v="${GITHUB_REF_NAME#v}"; else v="dev-$GITHUB_RUN_NUMBER"; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Version $v"
+
+      - name: Build the app
+        run: |
+          python make_icns.py icon.icns
+          pyinstaller --noconfirm --windowed --name "Photo Duplicate Checker" --icon icon.icns --osx-bundle-identifier io.github.battlingamazons.photoduplicatechecker --add-data "icon.ico:." --collect-all tkinterdnd2 --collect-all tifffile --collect-all imagecodecs --collect-all pillow_heif --collect-all pypdfium2 --collect-all rawpy app.py
+
+      - name: Package with license texts
+        run: |
+          mkdir -p "pkg/Photo Duplicate Checker"
+          cp -R "dist/Photo Duplicate Checker.app" "pkg/Photo Duplicate Checker/"
+          python collect_licenses.py "pkg/Photo Duplicate Checker"
+          cat > "pkg/Photo Duplicate Checker/READ ME FIRST.txt" <<'EOF'
+          Photo Duplicate Checker
+          =======================
+          1. Drag "Photo Duplicate Checker.app" into your Applications folder (or run it from here).
+          2. The first time: right-click the app, choose Open, then click Open again.
+             (macOS asks because the app is not signed by Apple.)
+             If macOS says the app is damaged, open Terminal and run:
+                 xattr -cr "/Applications/Photo Duplicate Checker.app"
+          3. Licenses of everything inside are in the "licenses" folder and in THIRD_PARTY_NOTICES.txt.
+          EOF
+
+      - name: Smoke-test the built app
+        run: |
+          rm -f selftest.txt
+          "pkg/Photo Duplicate Checker/Photo Duplicate Checker.app/Contents/MacOS/Photo Duplicate Checker" --selftest "$PWD/selftest.txt"
+          cat selftest.txt; echo
+          grep -q '^OK' selftest.txt
+          test -f "pkg/Photo Duplicate Checker/THIRD_PARTY_NOTICES.txt"
+          test -f "pkg/Photo Duplicate Checker/licenses/GPL-2.0.txt"
+
+      - name: Zip
+        run: |
+          cd pkg
+          ditto -c -k --keepParent "Photo Duplicate Checker" "../PhotoDuplicateChecker-${{ steps.ver.outputs.version }}-mac-${{ matrix.arch }}.zip"
+
+      - name: Test the zip as a user would unpack it
+        run: |
+          rm -rf unz && mkdir unz && ditto -x -k PhotoDuplicateChecker-*-mac-${{ matrix.arch }}.zip unz
+          rm -f selftest.txt
+          "unz/Photo Duplicate Checker/Photo Duplicate Checker.app/Contents/MacOS/Photo Duplicate Checker" --selftest "$PWD/selftest.txt"
+          cat selftest.txt; echo
+          grep -q '^OK' selftest.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PhotoDuplicateChecker-mac-${{ matrix.arch }}
+          path: "*.zip"
+          retention-days: 90
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, mac]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create $env:GITHUB_REF_NAME (Get-Item *.msi).FullName --title "Photo Duplicate Checker $env:GITHUB_REF_NAME" --notes "Download the .msi below and double-click it to install."
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ls -l assets
+          gh release create "$GITHUB_REF_NAME" assets/*.msi assets/*.zip \
+            --title "Photo Duplicate Checker $GITHUB_REF_NAME" \
+            --notes "**Windows:** download the .msi and double-click it to install.
+          **Mac:** download the .zip for your Mac (apple-silicon = M1 or newer; intel = older Macs), unzip it, and read 'READ ME FIRST.txt' (first launch: right-click the app, choose Open)."

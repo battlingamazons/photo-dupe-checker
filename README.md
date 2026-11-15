@@ -13,11 +13,16 @@ orientation. Everything runs offline on the local computer; no photos leave it.
 3. To remove it: Settings > Apps > Photo Duplicate Checker > Uninstall. Your photos
    and the index file are not touched.
 
+**Mac:** on the Releases page download the `.zip` for your Mac (`apple-silicon` = M1 or newer,
+`intel` = older Macs), unzip it and open **READ ME FIRST.txt**. The first time, right-click the app,
+choose **Open**, then **Open** again (the app is not signed by Apple). The index is kept in
+`~/.photodupechecker/index.db`.
+
 Installing a newer version over an older one upgrades it in place.
 
 ## Making a new release (developers)
-`git tag v1.0.1 && git push origin v1.0.1` - GitHub builds, tests (including a real
-install/run/uninstall) and publishes the MSI on the Releases page. Every push to
+`git tag v1.0.1 && git push origin v1.0.1` - GitHub builds and tests the Windows installer (including a real
+install/run/uninstall) and the two Mac apps, then publishes the MSI and the Mac zips on the Releases page. Every push to
 `main` also builds one, available under Actions > the run > Artifacts.
 
 ## Using it

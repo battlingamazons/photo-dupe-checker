@@ -47,6 +47,20 @@ THUMB_MAX, THUMB_MIN = 300, 90
 CARD_X, CARD_Y = 34, 178   # per-card horizontal / vertical overhead (borders, text, buttons)
 
 
+def app_version():
+    """Version of the packaged Mac app (read from its Info.plist); 'dev' when run from source."""
+    try:
+        import plistlib
+
+        if getattr(sys, "frozen", False) and sys.platform == "darwin":
+            plist = os.path.join(os.path.dirname(os.path.dirname(sys.executable)), "Info.plist")
+            with open(plist, "rb") as f:
+                return plistlib.load(f).get("CFBundleShortVersionString", "dev")
+    except Exception:  # noqa: BLE001
+        pass
+    return "dev"
+
+
 def find_notices():
     """Path of the license-notices file that ships with the program (it sits in different places per platform)."""
     here = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
@@ -367,7 +381,7 @@ class App(_Base):
         notes = find_notices()
         if messagebox.askyesno(
             "About Photo Duplicate Checker",
-            "Photo Duplicate Checker is free, open-source software (MIT license).\n"
+            f"Photo Duplicate Checker {app_version()} - free, open-source software (MIT license).\n"
             "It is built with other open-source components - including GPL/LGPL libraries for HEIC and RAW "
             "support - whose licenses are acknowledged in the notices file.\n\n"
             "Source code: https://github.com/battlingamazons/photo-dupe-checker\n\n"
@@ -806,5 +820,14 @@ def selftest(out_path):
 if __name__ == "__main__":
     if len(sys.argv) >= 3 and sys.argv[1] == "--selftest":
         selftest(sys.argv[2])
+    elif len(sys.argv) == 4 and sys.argv[1] == "--check":
+        # headless diagnostic: index photo A in memory, then check photo B against it
+        _ix = core.Index(":memory:")
+        _ix.add_file(sys.argv[2])
+        _m, _ = _ix.search(sys.argv[3])
+        print("version:", app_version())
+        print("matches:", [(round(s, 3), os.path.basename(p)) for s, p in _m])
+        print("flagged as cropped:", sorted(os.path.basename(p) for p in _ix.last_cropped))
+        print("crop check error:", _ix.crop_error)
     else:
         App().mainloop()

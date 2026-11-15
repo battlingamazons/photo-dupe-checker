@@ -170,6 +170,13 @@ jobs:
           python make_icns.py icon.icns
           pyinstaller --noconfirm --windowed --name "Photo Duplicate Checker" --icon icon.icns --osx-bundle-identifier io.github.battlingamazons.photoduplicatechecker --add-data "icon.ico:." --collect-all tkinterdnd2 --collect-all tifffile --collect-all imagecodecs --collect-all pillow_heif --collect-all pypdfium2 --collect-all rawpy app.py
 
+      - name: Stamp the version into the app
+        run: |
+          P="dist/Photo Duplicate Checker.app/Contents/Info.plist"
+          plutil -replace CFBundleShortVersionString -string "${{ steps.ver.outputs.version }}" "$P"
+          plutil -replace CFBundleVersion -string "${{ steps.ver.outputs.version }}" "$P"
+          codesign --force --deep --sign - "dist/Photo Duplicate Checker.app"
+
       - name: Package with license texts
         run: |
           mkdir -p "pkg/Photo Duplicate Checker"

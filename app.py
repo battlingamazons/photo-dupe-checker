@@ -572,13 +572,15 @@ class App(_Base):
             "check closest": "Probably new - but the closest photos below are worth a quick look (a badly worn copy can score low)",
             "looks new": "Looks new - no close match found",
         }[v]
+        if self.matches and self.matches[0][1] in self.cropped and v != "looks new":
+            text += "   - the closest one is the same photo cropped differently"
         if self.already:
             text += "   (this exact file is already in the index)"
         self.verdict.set(text)
         self.verdict_label.config(fg=COLORS.get(v, COLORS["likely duplicate"]))
         self.btn_addfile.config(state="normal" if not self.already else "disabled")
         self._cards = [("THIS SCAN" + ((" (auto-cropped)" if self.query_auto else " (cropped)") if self.query_crop else ""), self.query_path)] + [
-            (f"{core.similarity_percent(score)}% similar - {core.verdict(score, sens)}" + (" (cropped differently)" if path in self.cropped else ""), path)
+            (f"{core.similarity_percent(score)}% similar - {core.verdict(score, sens)}", path)
             for score, path in self.matches[: max(1, 4 - len(self.exact[:2]))]
         ]
         self._cards[1:1] = [("EXACT MATCH - identical file", p) for p in self.exact[:2]]

@@ -62,7 +62,7 @@ Two scans of one photo often differ in how tightly they were cropped - one edge 
 After the normal comparison, a second pass checks whether one picture is a window cut out of the other: every stored photo
 keeps a set of coarse windows (trimmed by up to about a quarter on each side, independently), the new scan is tried whole and
 as windows of itself, and the closest candidates are then lined up precisely. Only a precise fit counts, so unrelated photos
-are not reported. Such matches are marked "(cropped differently)". It copes with trims of up to about 25% per side (more than
+are not reported. When the closest match was found this way the verdict line says so. It copes with trims of up to about 25% per side (more than
 that may be missed); a match found this way is shown as a "possible match" or "likely duplicate" like any other.
 The first time you start a version with this feature, the index is rebuilt once (it needs extra data per photo), which takes
 about as long as the first scan did.

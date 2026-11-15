@@ -539,8 +539,8 @@ class App(_Base):
                     use = core.auto_crop(path)
                     was_auto = use is not None
                 exact = self.index.find_exact(path)
-                m, already = self.index.search(path, top=5 + len(exact), crop=use, also_whole=was_auto)
-                m = [x for x in m if x[1] not in exact][:5]
+                m, already = self.index.search(path, top=14 + len(exact), crop=use, also_whole=was_auto)
+                m = [x for x in m if x[1] not in exact][:14]
                 self.q.put(("search_done", token, m, already, use, was_auto, exact, set(self.index.last_cropped)))
             except Exception as e:  # noqa: BLE001
                 self.q.put(("search_error", token, str(e)))
@@ -586,8 +586,20 @@ class App(_Base):
             "check closest": "Probably new - but the closest photos below are worth a quick look (a badly worn copy can score low)",
             "looks new": "Looks new - no close match found",
         }[v]
+        # differently cropped versions of this photo: one card per distinct picture (copies of it in other
+        # folders score identically), and always given a slot so identical copies can't push it out of view
+        crops, seen = [], set()
+        for s, p in self.matches:
+            if p in self.cropped and core.verdict(s, sens) != "looks new" and round(s, 3) not in seen:
+                seen.add(round(s, 3))
+                crops.append((s, p))
+        crops = crops[:2]
         if self.matches and self.matches[0][1] in self.cropped and v not in ("looks new", "exact"):
             text += "   - the closest one is the same photo cropped differently"
+        elif crops:
+            text += "   - the collection also holds a differently cropped version of this photo"
+        if v == "exact" and len(self.exact) > 1:
+            text = text.replace("the file is identical", f"the file is identical ({len(self.exact)} copies)")
         if self.index.crop_error:
             text += f"   [cropped-copy check did not run: {self.index.crop_error}]"
         if self.already:
@@ -595,11 +607,19 @@ class App(_Base):
         self.verdict.set(text)
         self.verdict_label.config(fg=COLORS.get(v, COLORS["likely duplicate"]))
         self.btn_addfile.config(state="normal" if not self.already else "disabled")
-        self._cards = [("THIS SCAN" + ((" (auto-cropped)" if self.query_auto else " (cropped)") if self.query_crop else ""), self.query_path)] + [
-            (f"{core.similarity_percent(score)}% similar - {core.verdict(score, sens)}", path)
-            for score, path in self.matches[: max(1, 4 - len(self.exact[:2]))]
+        exact_cards = self.exact[:2]
+        slots = max(1, 4 - len(exact_cards))
+        crop_paths = {p for _s, p in crops}
+        others = [(s, p) for s, p in self.matches if p not in self.cropped][: max(0, slots - len(crops))] if crops else [
+            (s, p) for s, p in self.matches
+        ][:slots]
+        shown = sorted(others + crops, key=lambda t: -t[0])[:slots]
+        self._cards = [("THIS SCAN" + ((" (auto-cropped)" if self.query_auto else " (cropped)") if self.query_crop else ""), self.query_path)]
+        self._cards += [("EXACT MATCH - identical file", p) for p in exact_cards]
+        self._cards += [
+            (f"Same photo, cropped - {core.similarity_percent(s)}%" if p in crop_paths else f"{core.similarity_percent(s)}% similar - {core.verdict(s, sens)}", p)
+            for s, p in shown
         ]
-        self._cards[1:1] = [("EXACT MATCH - identical file", p) for p in self.exact[:2]]
         self._layout_cards()
 
     def _on_results_resize(self, event):

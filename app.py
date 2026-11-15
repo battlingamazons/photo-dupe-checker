@@ -574,6 +574,8 @@ class App(_Base):
         }[v]
         if self.matches and self.matches[0][1] in self.cropped and v not in ("looks new", "exact"):
             text += "   - the closest one is the same photo cropped differently"
+        if self.index.crop_error:
+            text += f"   [cropped-copy check did not run: {self.index.crop_error}]"
         if self.already:
             text += "   (this exact file is already in the index)"
         self.verdict.set(text)
@@ -718,6 +720,16 @@ def selftest(out_path):
         assert [os.path.basename(p) for p in app.exact] == ["x.png"], app.exact  # byte-identical copy
         assert app._cards[1][0].startswith("EXACT MATCH"), app._cards[:2]
         msgs.append("exact ok")
+        # the cropped-copy check must really run inside the packaged app (its errors are otherwise silent)
+        sm = Image.fromarray((rng.random((9, 12)) * 255).astype("uint8")).resize((640, 480), Image.BICUBIC)
+        sm_path, sm_crop = os.path.join(d, "smooth.png"), os.path.join(d, "smooth crop.png")
+        sm.save(sm_path)
+        sm.crop((96, 48, 576, 384)).save(sm_crop)
+        idx.add_file(sm_path)
+        found, _ = idx.search(sm_crop, top=3)
+        assert idx.crop_error is None, idx.crop_error
+        assert found and found[0][1] == os.path.normpath(sm_path) and found[0][0] >= 0.8, found[:2]
+        msgs.append("crop pass ok")
         msgs.append("drop ok")
 
         def fits():

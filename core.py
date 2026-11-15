@@ -588,6 +588,7 @@ class Index:
         self._db.commit()
         self._cache = None
         self.last_cropped = set()
+        self.crop_error = None  # set when the cropped-copy check could not run
 
     # ---- folders ----
     def folders(self):
@@ -809,11 +810,14 @@ class Index:
             V, scales, shifts = np.concatenate([V, V2]), np.concatenate([scales, s2]), np.concatenate([shifts, h2])
         best = _best_scores(V, scales, shifts, views).copy()
         self.last_cropped = set()
-        if cviews is not None and use_crop:
+        self.crop_error = None
+        if cviews is None and use_crop:
+            self.crop_error = "the index has no data for cropped copies"
+        elif cviews is not None and use_crop:
             try:
                 self._crop_pass(path, crop, paths, cviews, own, best)
-            except Exception:  # noqa: BLE001  (the extra pass must never break a search)
-                pass
+            except Exception as e:  # noqa: BLE001  (the extra pass must never break a search)
+                self.crop_error = f"{type(e).__name__}: {e}"
         if own is not None:
             best[own] = -9.0  # never match a file against itself
         k = min(top, len(best))

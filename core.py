@@ -4,6 +4,7 @@ No GUI code lives here so it can be tested without a display.
 """
 import os
 import hashlib
+import zlib
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -59,7 +60,7 @@ SENSITIVITY = {
     "Normal": (0.80, 0.66),
     "Generous": (0.75, 0.60),
 }
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def file_hash(path):
@@ -337,6 +338,15 @@ def describe(path):
     return np.stack([_window(P, s, 0, 0) for s in DB_WINDOWS]).astype(np.float16)
 
 
+def describe_full(path):
+    """Everything stored for an indexed photo: (4 windows, coarse crop windows, small picture)."""
+    g = _load_gray(path)
+    P = np.pad(strip_frame(np.asarray(g.resize((_SZ, _SZ), Image.LANCZOS), dtype=np.float32)), _PAD, mode="edge")
+    d4 = np.stack([_window(P, s, 0, 0) for s in DB_WINDOWS]).astype(np.float16)
+    big = _big_from_gray(g)
+    return d4, _crop_desc(big), _thumb_blob(big)
+
+
 def _query(path, crop=None):
     """All the positions a new scan is tried at (4 rotations x zooms x shifts)."""
     P = _prep(path, crop)
@@ -372,6 +382,180 @@ def similarity(path_a, path_b):
     return float(_best_scores(V, s, sh, [d[0:1], d[1:2]])[0])
 
 
+# ---------------------------------------------------------------------------
+# Crop-aware matching. Two scans of one photo can differ in how tightly they are cropped (one
+# edge trimmed more than another, a corner cut off...). The descriptors above only cope with a
+# modest centred difference, so this second pass looks for "one picture is a window cut out of the
+# other". Stage 1: every stored photo keeps 64 coarse windows (trimmed by 0 / 12 / 24 % on each
+# side, independently), and the new scan is tried whole and as many windows of its own. Stage 2:
+# the CROP_K best candidates are lined up precisely at higher resolution; only a precise fit
+# counts, which keeps unrelated photos from being reported.
+# ---------------------------------------------------------------------------
+_CSZ, _CPAD = 192, 96      # stored picture size (and edge padding) for crop matching
+_CT, _FT = 16, 48          # coarse (all photos) and fine (shortlist) descriptor sizes
+CROP_K = 150               # photos looked at more closely after the coarse pass
+CROP_REFINE = 40           # ... and of those, how many get the full precise alignment
+_CA1, _CA2 = 0.2, 0.15     # penalty per unit of cropping (coarse / precise)
+_CMIN = 0.45               # a window must keep at least this much of each side
+_cfgs = {}
+
+
+def _cfg(T):
+    if T not in _cfgs:
+        r = np.abs((np.arange(T) + 0.5) / T - 0.5)
+        w1 = np.where(r <= _FLAT, 1.0, np.where(r >= _END, 0.0, np.cos(np.pi / 2 * (r - _FLAT) / (_END - _FLAT)) ** 2))
+        _cfgs[T] = (_gauss_matrix(T, 0.8 * T / 32), _gauss_matrix(T, 2.2 * T / 32), np.outer(w1, w1).astype(np.float32))
+    return _cfgs[T]
+
+
+class _Big:
+    """A stored-size picture (padded) from which windows of any shape can be cut."""
+
+    def __init__(self, P):
+        self.P = P
+        self.im = Image.fromarray(np.ascontiguousarray(P), "F")
+
+    def window(self, box, T):
+        x0, x1, y0, y1 = box
+        scx, scy = _CSZ * (x1 - x0) / T, _CSZ * (y1 - y0) / T
+        cx = _CPAD + _CSZ * (x0 + x1) / 2 - scx * T / 2
+        cy = _CPAD + _CSZ * (y0 + y1) / 2 - scy * T / 2
+        w = np.asarray(self.im.transform((T, T), Image.AFFINE, (scx, 0, cx, 0, scy, cy), resample=Image.BILINEAR), np.float32)
+        if w.std() < 1.5:
+            return np.zeros(T * T, np.float32)
+        MH, ML, W = _cfg(T)
+        b = MH @ w @ MH.T - ML @ w @ ML.T
+        b = np.clip(b / (1.4826 * np.median(np.abs(b)) + 1e-6), -3, 3) * W
+        b = b - (b.sum() / W.sum()) * W
+        n = np.linalg.norm(b)
+        return (b / n).ravel() if n > 1e-4 else np.zeros(T * T, np.float32)
+
+
+def _axis(starts, ends):
+    return [(a, b) for a in starts for b in ends if b - a >= 0.5]
+
+
+_AX_DB = [p for p in _axis((0, 0.12, 0.24), (1, 0.88, 0.76)) if p != (0.24, 0.76)]
+_BOXES_DB = [(a, b, c, d) for (a, b) in _AX_DB for (c, d) in _AX_DB]                 # windows kept per stored photo
+_FULL_DB = _BOXES_DB.index((0, 1, 0, 1))
+_AX_Q = _axis((0, 0.06, 0.12, 0.18, 0.24), (1, 0.94, 0.88, 0.82, 0.76))
+_BOXES_Q = [(a, b, c, d) for (a, b) in _AX_Q for (c, d) in _AX_Q]                    # windows tried on the new scan
+_AX_J = [(0.5 + sh - sc / 2, 0.5 + sh + sc / 2) for sh, sc in ((-0.04, 1.0), (0, 1.0), (0.04, 1.0), (0, 0.94))]
+_BOXES_J = [(a, b, c, d) for (a, b) in _AX_J for (c, d) in _AX_J]                    # the whole scan, nudged a little
+
+
+def _trim(b):
+    return b[0] + (1 - b[1]) + b[2] + (1 - b[3])
+
+
+_TR_DB = np.array([_trim(b) for b in _BOXES_DB], np.float32)
+_TR_Q = np.array([_trim(b) for b in _BOXES_Q], np.float32)
+
+
+def _big_from_gray(g):
+    g = g.resize((_CSZ, _CSZ), Image.LANCZOS)
+    return _Big(np.pad(strip_frame(np.asarray(g, dtype=np.float32)), _CPAD, mode="edge"))
+
+
+def _crop_desc(big):
+    return np.stack([big.window(b, _CT) for b in _BOXES_DB]).astype(np.float16)
+
+
+def _thumb_blob(big):
+    return zlib.compress(np.ascontiguousarray(big.P[_CPAD:-_CPAD, _CPAD:-_CPAD]).astype(np.uint8).tobytes(), 3)
+
+
+def _big_from_blob(blob):
+    a = np.frombuffer(zlib.decompress(blob), np.uint8).reshape(_CSZ, _CSZ).astype(np.float32)
+    return _Big(np.pad(a, _CPAD, mode="edge"))
+
+
+def _load_gray(path, crop=None):
+    return crop_image(load_image(path, max_side=1600 if crop else 512), crop).convert("L")
+
+
+def _crop_query(path, crop=None):
+    """What the new scan is tried as: (whole, nudged) vectors and (windows) vectors for each of 4 turns."""
+    big = _big_from_gray(_load_gray(path, crop))
+    bigs, qj, qb = [], [], []
+    for rot in range(4):
+        b = big if rot == 0 else _Big(np.rot90(big.P, rot))
+        bigs.append(b)
+        qj.append(np.stack([b.window(x, _CT) for x in _BOXES_J]))
+        qb.append(np.stack([b.window(x, _CT) for x in _BOXES_Q]))
+    return bigs, np.concatenate(qj).astype(np.float32), np.concatenate(qb).astype(np.float32)
+
+
+def _crop_stage1(cviews, qj, qb):
+    """Coarse crop-tolerant score of the new scan against every stored photo (N,)."""
+    N = cviews[0].shape[0]
+    best = np.full(N, -9.0, np.float32)
+    tq = np.tile(_TR_Q, 4)
+    for i in range(0, N, 8192):
+        sl = slice(i, i + 8192)
+        m = best[sl]
+        for w, D in enumerate(cviews):
+            d = D[sl].astype(np.float32)
+            m = np.maximum(m, (d @ qj.T).max(axis=1) - _CA1 * _TR_DB[w])      # whole scan fits a window of the stored photo
+        d = cviews[_FULL_DB][sl].astype(np.float32)
+        m = np.maximum(m, ((d @ qb.T) - _CA1 * tq[None, :]).max(axis=1))       # a window of the scan fits the whole stored photo
+        best[sl] = m
+    return best
+
+
+def _refine(Q, S, qb, sb):
+    """Line two pictures up precisely: slide the window edges of both until the fit stops improving."""
+    def ok(b):
+        return b[1] - b[0] >= _CMIN and b[3] - b[2] >= _CMIN and min(b[0], b[2]) >= -0.08 and max(b[1], b[3]) <= 1.08
+
+    qb, sb = list(qb), list(sb)
+    vq, vs = Q.window(qb, _FT), S.window(sb, _FT)
+    cur = float(vq @ vs) - _CA2 * (_trim(qb) + _trim(sb))
+    for step in (0.04, 0.02, 0.01):
+        for _ in range(3):
+            moved = False
+            for edge in range(8):
+                mine, other_box, other_v, pic = (qb, sb, vs, Q) if edge < 4 else (sb, qb, vq, S)
+                e = edge % 4
+                for d in (-step, step):
+                    nb = list(mine)
+                    nb[e] += d
+                    if not ok(nb):
+                        continue
+                    nv = pic.window(nb, _FT)
+                    val = float(nv @ other_v) - _CA2 * (_trim(nb) + _trim(other_box))
+                    if val > cur + 1e-4:
+                        cur, mine[e], moved = val, nb[e], True
+                        if edge < 4:
+                            vq = nv
+                        else:
+                            vs = nv
+            if not moved:
+                break
+    return cur
+
+
+def crop_report(s2):
+    """Map a precise-fit score onto the 0..1 match scale: below 0.80 nothing is reported."""
+    return 0.0 if s2 < 0.80 else 0.60 + min((s2 - 0.80) / 0.15, 1.0) * 0.40
+
+
+def _crop_picks(qj, qb, dc, n=8):
+    """The n most promising ways of laying the scan on one stored photo: [(coarse score, turn, scan box, stored box)]."""
+    nj, nq = len(_BOXES_J), len(_BOXES_Q)
+    a = (qj @ dc.T) - _CA1 * _TR_DB[None, :]
+    b = (qb @ dc[_FULL_DB]) - _CA1 * np.tile(_TR_Q, 4)
+    out = []
+    flat = a.ravel()
+    for k in np.argpartition(-flat, n - 1)[:n]:
+        r, w = divmod(int(k), a.shape[1])
+        out.append((float(flat[k]), r // nj, _BOXES_J[r % nj], _BOXES_DB[w]))
+    for k in np.argpartition(-b, n - 1)[:n]:
+        out.append((float(b[k]), int(k) // nq, _BOXES_Q[int(k) % nq], _BOXES_DB[_FULL_DB]))
+    out.sort(key=lambda t: -t[0])
+    return out[:n]
+
+
 class Index:
     def __init__(self, db_path=None):
         self.db_path = str(db_path or default_db_path())
@@ -387,12 +571,14 @@ class Index:
             if had:
                 self.upgraded = self._db.execute("SELECT COUNT(*) FROM files").fetchone()[0] > 0
                 self._db.execute("DROP TABLE files")
+            self._db.execute("DROP TABLE IF EXISTS thumbs")
             self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self._db.executescript(
             """
             CREATE TABLE IF NOT EXISTS files (
                 path TEXT PRIMARY KEY, folder TEXT, size INTEGER, mtime REAL,
-                desc BLOB NOT NULL, sha TEXT);
+                desc BLOB NOT NULL, sha TEXT, cdesc BLOB);
+            CREATE TABLE IF NOT EXISTS thumbs (path TEXT PRIMARY KEY, img BLOB NOT NULL);
             CREATE INDEX IF NOT EXISTS files_folder ON files(folder);
             """
         )
@@ -401,6 +587,7 @@ class Index:
         self._db.execute("CREATE INDEX IF NOT EXISTS files_sha ON files(sha)")
         self._db.commit()
         self._cache = None
+        self.last_cropped = set()
 
     # ---- folders ----
     def folders(self):
@@ -416,6 +603,7 @@ class Index:
 
     def remove_folder(self, path):
         with self._lock:
+            self._db.execute("DELETE FROM thumbs WHERE path IN (SELECT path FROM files WHERE folder = ?)", (path,))
             self._db.execute("DELETE FROM files WHERE folder = ?", (path,))
             self._db.execute("DELETE FROM folders WHERE path = ?", (path,))
             self._db.commit()
@@ -468,6 +656,7 @@ class Index:
                 gone = [p for p in known if p not in seen]
                 with self._lock:
                     self._db.executemany("DELETE FROM files WHERE path = ?", [(p,) for p in gone])
+                    self._db.executemany("DELETE FROM thumbs WHERE path = ?", [(p,) for p in gone])
                     self._db.commit()
                 summary["removed"] += len(gone)
 
@@ -475,7 +664,8 @@ class Index:
                 if cancel and cancel.is_set():
                     return item, None, "cancelled"
                 try:
-                    return item, (describe(item[0]).tobytes(), file_hash(item[0])), None
+                    d4, cd, th = describe_full(item[0])
+                    return item, (d4.tobytes(), file_hash(item[0]), cd.tobytes(), th), None
                 except Exception as e:  # corrupt/unsupported file
                     return item, None, str(e)
 
@@ -486,9 +676,10 @@ class Index:
                     if desc:
                         with self._lock:
                             self._db.execute(
-                                "INSERT OR REPLACE INTO files (path, folder, size, mtime, desc, sha) VALUES (?,?,?,?,?,?)",
-                                (item[0], folder, item[1], item[2], desc[0], desc[1]),
+                                "INSERT OR REPLACE INTO files (path, folder, size, mtime, desc, sha, cdesc) VALUES (?,?,?,?,?,?,?)",
+                                (item[0], folder, item[1], item[2], desc[0], desc[1], desc[2]),
                             )
+                            self._db.execute("INSERT OR REPLACE INTO thumbs (path, img) VALUES (?,?)", (item[0], desc[3]))
                             if done % 500 == 0:
                                 self._db.commit()
                         summary["added"] += 1
@@ -520,13 +711,14 @@ class Index:
         """Add one photo (e.g. a confirmed-new scan) outside any watched folder."""
         path = os.path.normpath(path)
         st = os.stat(path)
-        desc = describe(path).tobytes()
+        d4, cd, th = describe_full(path)
         sha = file_hash(path)
         with self._lock:
             self._db.execute(
-                "INSERT OR REPLACE INTO files (path, folder, size, mtime, desc, sha) VALUES (?,?,?,?,?,?)",
-                (path, None, st.st_size, st.st_mtime, desc, sha),
+                "INSERT OR REPLACE INTO files (path, folder, size, mtime, desc, sha, cdesc) VALUES (?,?,?,?,?,?,?)",
+                (path, None, st.st_size, st.st_mtime, d4.tobytes(), sha, cd.tobytes()),
             )
+            self._db.execute("INSERT OR REPLACE INTO thumbs (path, img) VALUES (?,?)", (path, th))
             self._db.commit()
             self._cache = None
 
@@ -542,7 +734,7 @@ class Index:
     def _arrays(self):
         with self._lock:
             if self._cache is None:
-                rows = self._db.execute("SELECT path, desc FROM files").fetchall()
+                rows = self._db.execute("SELECT path, desc, cdesc FROM files").fetchall()
                 paths = [r[0] for r in rows]
                 n = len(rows)
                 if n:
@@ -552,17 +744,61 @@ class Index:
                         raw[i] = np.frombuffer(r[1], dtype=np.float16).reshape(nw, _T * _T)
                     views = [np.ascontiguousarray(raw[:, k, :], dtype=np.float32) for k in range(nw)]
                     del raw
+                    nb = len(_BOXES_DB)
+                    craw = np.zeros((n, nb, _CT * _CT), dtype=np.float16)
+                    for i, r in enumerate(rows):
+                        if r[2]:
+                            craw[i] = np.frombuffer(r[2], dtype=np.float16).reshape(nb, _CT * _CT)
+                    cviews = [np.ascontiguousarray(craw[:, k, :]) for k in range(nb)]  # float16 to save memory
+                    del craw
                 else:
                     views = [np.zeros((0, _T * _T), np.float32) for _ in DB_WINDOWS]
+                    cviews = None
                 lookup = {os.path.normcase(p): i for i, p in enumerate(paths)}
-                self._cache = (paths, views, lookup)
+                self._cache = (paths, views, lookup, cviews)
             return self._cache
 
-    def search(self, path, top=5, crop=None, also_whole=False):
+    def _crop_pass(self, path, crop, paths, cviews, own, best):
+        """Raise the score of stored photos that are a differently-cropped copy of the scan."""
+        bigs, qj, qb = _crop_query(path, crop)
+        s1 = _crop_stage1(cviews, qj, qb)
+        if own is not None:
+            s1[own] = -9.0
+        k = min(CROP_K, len(s1))
+        cand = np.argpartition(-s1, k - 1)[:k]
+        cand = cand[np.argsort(-s1[cand], kind="stable")]
+        with self._lock:
+            blobs = {}
+            for j in range(0, len(cand), 200):
+                chunk = [paths[i] for i in cand[j : j + 200]]
+                q = ",".join("?" * len(chunk))
+                blobs.update(self._db.execute(f"SELECT path, img FROM thumbs WHERE path IN ({q})", chunk).fetchall())
+        starts = []   # (rough fit, photo, picture, scan turn, scan box, stored box)
+        for i in cand:
+            blob = blobs.get(paths[i])
+            if blob is None:
+                continue
+            dc = np.stack([v[i] for v in cviews]).astype(np.float32)
+            S = _big_from_blob(blob)
+            best_start = None
+            for _s, rot, qbox, sbox in _crop_picks(qj, qb, dc):
+                raw = float(bigs[rot].window(qbox, _FT) @ S.window(sbox, _FT)) - _CA2 * (_trim(qbox) + _trim(sbox))
+                if best_start is None or raw > best_start[0]:
+                    best_start = (raw, i, S, rot, qbox, sbox)
+            if best_start:
+                starts.append(best_start)
+        starts.sort(key=lambda t: -t[0])
+        for _raw, i, S, rot, qbox, sbox in starts[:CROP_REFINE]:   # only the most promising get the full alignment
+            rep = crop_report(_refine(bigs[rot], S, qbox, sbox))
+            if rep > best[i]:
+                best[i] = rep
+                self.last_cropped.add(paths[i])
+
+    def search(self, path, top=5, crop=None, also_whole=False, use_crop=True):
         """Return (matches, already_indexed). matches = [(score 0..1, path)], best first.
         crop: only look at this part of the scan. also_whole: additionally try the whole scan
         and keep whichever fits each stored photo better (used for automatic cropping)."""
-        paths, views, lookup = self._arrays()
+        paths, views, lookup, cviews = self._arrays()
         own = lookup.get(os.path.normcase(os.path.normpath(path)))
         if not paths:
             return [], own is not None
@@ -571,6 +807,12 @@ class Index:
             V2, s2, h2 = _query(path)
             V, scales, shifts = np.concatenate([V, V2]), np.concatenate([scales, s2]), np.concatenate([shifts, h2])
         best = _best_scores(V, scales, shifts, views).copy()
+        self.last_cropped = set()
+        if cviews is not None and use_crop:
+            try:
+                self._crop_pass(path, crop, paths, cviews, own, best)
+            except Exception:  # noqa: BLE001  (the extra pass must never break a search)
+                pass
         if own is not None:
             best[own] = -9.0  # never match a file against itself
         k = min(top, len(best))

@@ -287,3 +287,63 @@ def test_exact_copy_is_found_by_hash(tmp_path):
     db = sqlite3.connect(tmp_path / "i.db"); db.execute("UPDATE files SET sha = NULL"); db.commit(); db.close()
     idx2 = core.Index(tmp_path / "i.db"); idx2.rescan()
     assert [os.path.basename(p) for p in idx2.find_exact(str(copy))] == ["p1.png"]
+
+
+# ---- two scans of one photo cropped differently (either one may be the tighter) ----
+CROPS = {
+    "left_trim": (0.2, 0.0, 1.0, 1.0), "top_corner": (0.0, 0.0, 0.75, 0.75), "bottom_right": (0.24, 0.24, 1.0, 1.0),
+    "lopsided": (0.15, 0.05, 0.9, 0.7), "a_little_tighter": (0.1, 0.1, 0.9, 0.9), "one_side_more": (0.03, 0.08, 0.97, 0.88),
+}
+
+
+def cut(im, box):
+    w, h = im.size
+    return im.crop((int(box[0] * w), int(box[1] * h), int(box[2] * w), int(box[3] * h)))
+
+
+@pytest.mark.parametrize("name", CROPS)
+def test_tighter_crop_of_a_stored_photo_is_found(name, library):
+    idx, tmp = library
+    for i in (3, 17):
+        q = tmp / f"cq_{name}_{i}.png"
+        cut(make_photo(i), CROPS[name]).save(q)
+        matches, _ = idx.search(str(q))
+        score, path = matches[0]
+        assert path.endswith(f"p{i}.png"), (name, i, matches[:2])
+        assert score >= POSSIBLE, (name, i, score)
+
+
+@pytest.mark.parametrize("name", CROPS)
+def test_fuller_scan_finds_the_stored_tighter_crop(name, tmp_path):
+    folder = tmp_path / "scans"
+    folder.mkdir()
+    for i in range(12):
+        im = make_photo(i)
+        (cut(im, CROPS[name]) if i in (3, 7) else im).save(folder / f"p{i}.png")
+    idx = core.Index(tmp_path / "i.db")
+    idx.add_folder(str(folder))
+    idx.rescan()
+    for i in (3, 7):
+        q = tmp_path / f"full_{i}.png"
+        make_photo(i).save(q)
+        matches, _ = idx.search(str(q))
+        score, path = matches[0]
+        assert path.endswith(f"p{i}.png"), (name, i, matches[:2])
+        assert score >= POSSIBLE, (name, i, score)
+
+
+@pytest.mark.parametrize("name", CROPS)
+def test_crop_of_an_unrelated_photo_is_not_reported_as_a_match(name, library):
+    idx, tmp = library
+    q = tmp / f"unrel_{name}.png"
+    cut(make_photo(500), CROPS[name]).save(q)  # a photo that is not in the library
+    matches, _ = idx.search(str(q))
+    assert matches[0][0] < POSSIBLE, (name, matches[:2])
+
+
+def test_crop_match_is_flagged_so_the_app_can_say_so(library):
+    idx, tmp = library
+    q = tmp / "flag.png"
+    cut(make_photo(3), CROPS["left_trim"]).save(q)
+    matches, _ = idx.search(str(q))
+    assert matches[0][1] in idx.last_cropped or matches[0][0] >= DUP

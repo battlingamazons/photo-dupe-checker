@@ -247,6 +247,7 @@ class App(_Base):
         self.minsize(min(900, w), min(640, h))
         self.index = index or core.Index()
         self.matches, self.already, self.exact = [], False, []
+        self.cropped = set()
         self.q = queue.Queue()
         self.cancel = threading.Event()
         self.busy = False
@@ -441,7 +442,7 @@ class App(_Base):
                     self._set_busy(False)
                     messagebox.showerror("Problem while indexing", msg[1])
                 elif msg[0] == "search_done":
-                    self._search_finished(msg[1], msg[2], msg[3], crop=msg[4], auto=msg[5], exact=msg[6])
+                    self._search_finished(msg[1], msg[2], msg[3], crop=msg[4], auto=msg[5], exact=msg[6], cropped=msg[7])
                 elif msg[0] == "search_error":
                     self._search_finished(msg[1], [], False, error=msg[2])
         except queue.Empty:
@@ -526,13 +527,13 @@ class App(_Base):
                 exact = self.index.find_exact(path)
                 m, already = self.index.search(path, top=5 + len(exact), crop=use, also_whole=was_auto)
                 m = [x for x in m if x[1] not in exact][:5]
-                self.q.put(("search_done", token, m, already, use, was_auto, exact))
+                self.q.put(("search_done", token, m, already, use, was_auto, exact, set(self.index.last_cropped)))
             except Exception as e:  # noqa: BLE001
                 self.q.put(("search_error", token, str(e)))
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _search_finished(self, token, matches, already, error=None, crop=None, auto=False, exact=()):
+    def _search_finished(self, token, matches, already, error=None, crop=None, auto=False, exact=(), cropped=()):
         if token != self._search_token:
             return
         self.searching = False
@@ -544,6 +545,7 @@ class App(_Base):
             messagebox.showerror("Could not read that photo", error)
             return
         self.matches, self.already, self.exact = matches, already, list(exact)
+        self.cropped = set(cropped)  # matches found because one scan is cropped differently from the other
         self.query_crop, self.query_auto = crop, auto
         self.show_results()
 
@@ -576,7 +578,7 @@ class App(_Base):
         self.verdict_label.config(fg=COLORS.get(v, COLORS["likely duplicate"]))
         self.btn_addfile.config(state="normal" if not self.already else "disabled")
         self._cards = [("THIS SCAN" + ((" (auto-cropped)" if self.query_auto else " (cropped)") if self.query_crop else ""), self.query_path)] + [
-            (f"{core.similarity_percent(score)}% similar - {core.verdict(score, sens)}", path)
+            (f"{core.similarity_percent(score)}% similar - {core.verdict(score, sens)}" + (" (cropped differently)" if path in self.cropped else ""), path)
             for score, path in self.matches[: max(1, 4 - len(self.exact[:2]))]
         ]
         self._cards[1:1] = [("EXACT MATCH - identical file", p) for p in self.exact[:2]]

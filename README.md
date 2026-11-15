@@ -52,10 +52,20 @@ fading, yellowing and stains. A new scan is compared to every stored photo at ma
 zoom / shift / rotation positions, so these still match the original copy:
 faded, yellowed or stained prints; dust and scratches; torn corners; creases; scanner
 flat borders and dark scanner-bed edges (these are cut away before comparing, so two unrelated scans that share the same border are not mistaken for each other); crops; a few degrees of skew; a sideways scan;
-lower resolution; and different file formats (e.g. a JPEG vs. an older TIFF).
+lower resolution; one scan cropped tighter than the other (either one may be the tighter; see below); and different file formats (e.g. a JPEG vs. an older TIFF).
 
 The four closest photos are always shown, even when the verdict is "looks new", so a
 badly worn copy can still be recognised by eye. Matches are suggestions; confirm by eye.
+
+## Differently cropped copies
+Two scans of one photo often differ in how tightly they were cropped - one edge trimmed more than another, a corner cut off.
+After the normal comparison, a second pass checks whether one picture is a window cut out of the other: every stored photo
+keeps a set of coarse windows (trimmed by up to about a quarter on each side, independently), the new scan is tried whole and
+as windows of itself, and the closest candidates are then lined up precisely. Only a precise fit counts, so unrelated photos
+are not reported. Such matches are marked "(cropped differently)". It copes with trims of up to about 25% per side (more than
+that may be missed); a match found this way is shown as a "possible match" or "likely duplicate" like any other.
+The first time you start a version with this feature, the index is rebuilt once (it needs extra data per photo), which takes
+about as long as the first scan did.
 
 ## Limits
 Very heavily damaged copies (faint, stained, creased, cropped and bordered all at once)

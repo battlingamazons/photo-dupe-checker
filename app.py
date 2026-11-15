@@ -572,7 +572,7 @@ class App(_Base):
             "check closest": "Probably new - but the closest photos below are worth a quick look (a badly worn copy can score low)",
             "looks new": "Looks new - no close match found",
         }[v]
-        if self.matches and self.matches[0][1] in self.cropped and v != "looks new":
+        if self.matches and self.matches[0][1] in self.cropped and v not in ("looks new", "exact"):
             text += "   - the closest one is the same photo cropped differently"
         if self.already:
             text += "   (this exact file is already in the index)"

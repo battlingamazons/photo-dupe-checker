@@ -791,8 +791,9 @@ class Index:
         for _raw, i, S, rot, qbox, sbox in starts[:CROP_REFINE]:   # only the most promising get the full alignment
             rep = crop_report(_refine(bigs[rot], S, qbox, sbox))
             if rep > best[i]:
+                if rep > best[i] + 0.05:  # only call it a crop match when the normal comparison clearly missed it
+                    self.last_cropped.add(paths[i])
                 best[i] = rep
-                self.last_cropped.add(paths[i])
 
     def search(self, path, top=5, crop=None, also_whole=False, use_crop=True):
         """Return (matches, already_indexed). matches = [(score 0..1, path)], best first.

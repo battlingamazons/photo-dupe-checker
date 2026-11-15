@@ -135,10 +135,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
+      # Not the python.org / setup-python build: it bundles Tk 8.6, whose windows freeze on macOS 26 (Tahoe).
+      # Homebrew's Python uses Tk 9, which works on old and new macOS alike.
+      - name: Python with Tk 9 (Homebrew)
+        run: |
+          brew install python@3.14 python-tk@3.14
+          "$(brew --prefix python@3.14)/bin/python3.14" -m venv "$HOME/venv"
+          echo "$HOME/venv/bin" >> "$GITHUB_PATH"
+          "$HOME/venv/bin/python" -c "import tkinter; print('Tk', tkinter.TkVersion); assert tkinter.TkVersion >= 9.0, 'need Tk 9'"
 
       - name: Install dependencies
         run: pip install -r requirements.txt pytest pyinstaller
@@ -175,11 +179,14 @@ jobs:
           EOF
 
       - name: Smoke-test the built app
+        timeout-minutes: 4
         run: |
           rm -f selftest.txt
           "pkg/Photo Duplicate Checker/Photo Duplicate Checker.app/Contents/MacOS/Photo Duplicate Checker" --selftest "$PWD/selftest.txt"
           cat selftest.txt; echo
           grep -q '^OK' selftest.txt
+          # the bundled Tk must be 9.x (8.6 hangs on macOS 26)
+          ls "pkg/Photo Duplicate Checker/Photo Duplicate Checker.app/Contents/Frameworks" | grep -q 'libtcl9'
           test -f "pkg/Photo Duplicate Checker/THIRD_PARTY_NOTICES.txt"
           test -f "pkg/Photo Duplicate Checker/licenses/GPL-2.0.txt"
 
@@ -189,6 +196,7 @@ jobs:
           ditto -c -k --keepParent "Photo Duplicate Checker" "../PhotoDuplicateChecker-${{ steps.ver.outputs.version }}-mac-${{ matrix.arch }}.zip"
 
       - name: Test the zip as a user would unpack it
+        timeout-minutes: 4
         run: |
           rm -rf unz && mkdir unz && ditto -x -k PhotoDuplicateChecker-*-mac-${{ matrix.arch }}.zip unz
           rm -f selftest.txt

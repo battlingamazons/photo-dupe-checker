@@ -44,7 +44,7 @@ def reveal(path):
 
 
 THUMB_MAX, THUMB_MIN = 300, 90
-MORE_MAX = 30              # most matches listed in the 'More matches' window
+MORE_MAX = 500             # most matches kept for the 'More matches' window
 CARD_X, CARD_Y = 34, 178   # per-card horizontal / vertical overhead (borders, text, buttons)
 
 
@@ -95,17 +95,27 @@ def thumbnail(path, size=THUMB):
 
 class MoreWindow(tk.Toplevel):
     """Every match found, as a scrolling grid: identical copies first, then differently cropped
-    versions, then the other close matches."""
+    versions, then the other close matches - all those at least as similar as the chosen cutoff."""
 
     THUMB, COLS = 190, 4
 
-    def __init__(self, parent, cards, summary):
+    def __init__(self, parent, entries, name, default_min):
+        """entries: [(kind, percent, heading, path)] with kind 'exact' | 'crop' | 'other'."""
         super().__init__(parent)
         self.title("More matches")
-        self.geometry("1020x720")
-        self.cards = cards
-        self._images = []
-        ttk.Label(self, text=summary, font=("Segoe UI", 11, "bold"), wraplength=960, justify="left").pack(fill="x", padx=12, pady=(10, 4))
+        self.geometry("1020x740")
+        self.entries, self.name = entries, name
+        self.cards, self._images, self._slots, self._gen, self._job = [], [], [], 0, None
+        self.summary = tk.StringVar()
+        ttk.Label(self, textvariable=self.summary, font=("Segoe UI", 11, "bold"), wraplength=960, justify="left").pack(fill="x", padx=12, pady=(10, 2))
+        bar_row = ttk.Frame(self)
+        bar_row.pack(fill="x", padx=12, pady=(0, 4))
+        ttk.Label(bar_row, text="Show matches that are at least").pack(side="left")
+        self.minvar = tk.StringVar(value=str(default_min))
+        self.spin = ttk.Spinbox(bar_row, from_=0, to=100, increment=5, width=4, textvariable=self.minvar, command=self._changed)
+        self.spin.pack(side="left", padx=4)
+        ttk.Label(bar_row, text=f"% similar   (identical copies are always shown; 0 shows everything, up to the best {MORE_MAX})", foreground="#555").pack(side="left")
+        self.minvar.trace_add("write", lambda *a: self._changed())
         body = ttk.Frame(self)
         body.pack(fill="both", expand=True, padx=8, pady=6)
         self.canvas = tk.Canvas(body, highlightthickness=0)
@@ -121,10 +131,52 @@ class MoreWindow(tk.Toplevel):
         self.bind("<Button-5>", lambda e: self.canvas.yview_scroll(3, "units"))
         self.bind("<Escape>", lambda e: self.destroy())
         ttk.Button(self, text="Close", command=self.destroy).pack(pady=(0, 8))
-        self._slots = []
-        for i, (heading, path) in enumerate(cards):
+        self.rebuild()
+
+    def minimum(self):
+        try:
+            return max(0, min(100, int(float(self.minvar.get()))))
+        except ValueError:
+            return None
+
+    def _changed(self):
+        if self._job:
+            self.after_cancel(self._job)
+        self._job = self.after(300, self.rebuild)
+
+    def set_min(self, pct):
+        self.minvar.set(str(pct))
+        if self._job:
+            self.after_cancel(self._job)
+            self._job = None
+        self.rebuild()
+
+    def rebuild(self):
+        self._job = None
+        lo = self.minimum()
+        if lo is None:
+            return
+        self._gen += 1
+        for w in self.inner.winfo_children():
+            w.destroy()
+        self._images, self._slots = [], []
+        shown = [x for x in self.entries if x[0] == "exact" or x[1] >= lo]
+        self.cards = [(h, p) for _k, _pc, h, p in shown]
+        n_ex = sum(1 for x in shown if x[0] == "exact")
+        n_cr = sum(1 for x in shown if x[0] == "crop")
+        parts = []
+        if n_ex:
+            parts.append(f"{n_ex} identical cop{'y' if n_ex == 1 else 'ies'}")
+        if n_cr:
+            parts.append(f"{n_cr} differently cropped")
+        parts.append(f"{len(shown) - n_ex - n_cr} other matches")
+        hidden = len(self.entries) - len(shown)
+        self.summary.set(f"{self.name}: " + ", ".join(parts) + (f"  ({hidden} below {lo}% hidden)" if hidden else ""))
+        for i, (heading, path) in enumerate(self.cards):
             self._slots.append(self._card(i // self.COLS, i % self.COLS, heading, path))
-        self.after(20, lambda: self._fill(0))  # thumbnails load a few at a time so the window opens at once
+        self.canvas.yview_moveto(0)
+        gen = self._gen
+        self.after(20, lambda: self._fill(0, gen))  # thumbnails load a few at a time so the window opens at once
 
     def _wheel(self, e):
         step = -1 * (e.delta // 120) if abs(e.delta) >= 120 else (-1 if e.delta > 0 else 1)
@@ -145,19 +197,19 @@ class MoreWindow(tk.Toplevel):
         ttk.Button(row_f, text="Show in folder", command=lambda: reveal(path)).pack(side="left", padx=2)
         return pic, path
 
-    def _fill(self, start):
-        if not self.winfo_exists():
+    def _fill(self, start, gen):
+        if not self.winfo_exists() or gen != self._gen:
             return
         for pic, path in self._slots[start : start + 3]:
             try:
-                img = load_pil_thumb(path, self.THUMB)
-                photo = ImageTk.PhotoImage(img)
+                photo = ImageTk.PhotoImage(load_pil_thumb(path, self.THUMB))
                 self._images.append(photo)
                 pic.config(image=photo, text="", width=0)
             except Exception:  # noqa: BLE001
+                self._images.append(None)
                 pic.config(text="(cannot preview)")
         if start + 3 < len(self._slots):
-            self.after(10, lambda: self._fill(start + 3))
+            self.after(10, lambda: self._fill(start + 3, gen))
 
 
 class CropDialog(tk.Toplevel):
@@ -767,27 +819,22 @@ class App(_Base):
         if DND_FILES:
             self._register_drop(f)
 
-    def more_cards(self):
-        """(heading, path) for everything found: identical copies, cropped versions, then other matches."""
+    def more_entries(self):
+        """Everything found as (kind, percent, heading, path): identical copies, cropped versions, other matches."""
         sens = self.sens.get()
-        cards = [("EXACT MATCH - identical file", p) for p in self.exact]
-        cards += [(f"Same photo, cropped - {core.similarity_percent(s)}%", p) for s, p in self.matches if p in self.cropped]
-        cards += [(f"{core.similarity_percent(s)}% similar - {core.verdict(s, sens)}", p) for s, p in self.matches if p not in self.cropped]
-        return cards
+        out = [("exact", 100, "EXACT MATCH - identical file", p) for p in self.exact]
+        out += [("crop", core.similarity_percent(s), f"Same photo, cropped - {core.similarity_percent(s)}%", p) for s, p in self.matches if p in self.cropped]
+        out += [("other", core.similarity_percent(s), f"{core.similarity_percent(s)}% similar - {core.verdict(s, sens)}", p) for s, p in self.matches if p not in self.cropped]
+        return out
 
     def show_more(self):
-        cards = self.more_cards()
-        if not cards:
+        entries = self.more_entries()
+        if not entries:
             return
-        n_ex = len(self.exact)
-        n_cr = sum(1 for _s, p in self.matches if p in self.cropped)
-        parts = []
-        if n_ex:
-            parts.append(f"{n_ex} identical cop{'y' if n_ex == 1 else 'ies'}")
-        if n_cr:
-            parts.append(f"{n_cr} differently cropped")
-        parts.append(f"{len(cards) - n_ex - n_cr} other close matches")
-        self.more = MoreWindow(self, cards, f"{os.path.basename(self.query_path)}: " + ", ".join(parts) + f" (best {MORE_MAX} matches shown).")
+        maybe = core.SENSITIVITY[self.sens.get()][1]
+        if getattr(self, "more", None) is not None and self.more.winfo_exists():
+            self.more.destroy()
+        self.more = MoreWindow(self, entries, os.path.basename(self.query_path), core.similarity_percent(maybe))
 
     def add_current(self):
         if not self.query_path:
@@ -876,14 +923,27 @@ def selftest(out_path):
         app.btn_more.invoke() if str(app.btn_more.cget("state")) == "normal" else None
         app.update()
         assert str(app.btn_more.cget("state")) == "normal", "more-matches button not enabled after a check"
-        n_expected = len(app.exact) + len(app.matches)
-        assert getattr(app, "more", None) and len(app.more.cards) == n_expected >= 2, (n_expected, getattr(app, "more", None))
+        total = len(app.exact) + len(app.matches)
+        assert getattr(app, "more", None) is not None, "more-matches window did not open"
+        app.more.set_min(0)  # everything
+        assert len(app.more.cards) == total >= 2, (len(app.more.cards), total)
         t0 = time.time()
         while time.time() - t0 < 20 and len(app.more._images) < len(app.more.cards):
             app.update()
             time.sleep(0.05)
         assert len(app.more._images) == len(app.more.cards), "thumbnails did not load in the more-matches window"
         app.more.destroy()
+        # the similarity cutoff: identical copies always stay, others need to reach it
+        some = os.path.join(d, "x.png")
+        probe = MoreWindow(app, [("exact", 100, "E", some), ("other", 90, "A", some), ("crop", 72, "B", some), ("other", 40, "C", some)], "probe", 60)
+        assert len(probe.cards) == 3, probe.cards  # 100, 90, 72 at 60%
+        probe.set_min(95)
+        assert [h for h, _p in probe.cards] == ["E"], probe.cards
+        probe.set_min(0)
+        assert len(probe.cards) == 4
+        probe.set_min(100)
+        assert [h for h, _p in probe.cards] == ["E"], probe.cards
+        probe.destroy()
         msgs.append("more matches ok")
         # the cropped-copy check must really run inside the packaged app (its errors are otherwise silent)
         sm = Image.fromarray((rng.random((9, 12)) * 255).astype("uint8")).resize((640, 480), Image.BICUBIC)

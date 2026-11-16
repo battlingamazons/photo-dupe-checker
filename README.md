@@ -67,6 +67,12 @@ that may be missed); a match found this way is shown as a "possible match" or "l
 The first time you start a version with this feature, the index is rebuilt once (it needs extra data per photo), which takes
 about as long as the first scan did.
 
+## Show more matches
+The result area shows the best few matches so it always fits on one screen. **Show more matches...** opens a window with
+everything found as a scrolling grid: identical copies first, then differently cropped versions, then other matches. A box at the top
+sets the lowest similarity to show (it starts at the "possible match" level for your Sensitivity setting; 0 shows everything, up to the
+best 500). Identical copies are always listed.
+
 ## Extremely cropped copies (found through faces)
 When one scan is only a small piece of the other (for example just the people at the bottom of a house photo), the pass above
 cannot see it. For photos with faces there is a further check: the program looks for faces in every photo (two small models,

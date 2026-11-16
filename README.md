@@ -67,6 +67,16 @@ that may be missed); a match found this way is shown as a "possible match" or "l
 The first time you start a version with this feature, the index is rebuilt once (it needs extra data per photo), which takes
 about as long as the first scan did.
 
+## Extremely cropped copies (found through faces)
+When one scan is only a small piece of the other (for example just the people at the bottom of a house photo), the pass above
+cannot see it. For photos with faces there is a further check: the program looks for faces in every photo (two small models,
+YuNet and SFace, shipped with it; nothing leaves the computer). A face in a crop is the same pixels as in the full photo, so it
+matches very closely (typically 0.9 or more, where two different people stay under about 0.5). A close face match tells the
+program where in the other photo to look and how big the crop is, and then the actual pixels are compared at that spot. Only if
+they agree is it reported ("Same photo, cropped"). Photos with no detectable face are not covered by this check.
+The first launch after updating looks for faces in the existing index once (no rebuild; roughly 0.1-0.5 s per photo, so a
+collection of tens of thousands takes a while - it can be cancelled and continues next time). New photos are checked as they are added.
+
 ## Limits
 Very heavily damaged copies (faint, stained, creased, cropped and bordered all at once)
 may score low, but usually still appear among the four closest. Photos with large

@@ -5,4 +5,5 @@ imagecodecs
 pillow-heif
 pypdfium2
 rawpy
+opencv-python-headless
 tkinterdnd2

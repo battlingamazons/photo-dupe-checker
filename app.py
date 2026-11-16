@@ -290,6 +290,10 @@ class App(_Base):
                 self._reindex_note = True
                 self.verdict.set("Matching was improved in this version - rebuilding your index (one time).")
             self.rescan()
+        elif self.index.folders() and not self.busy and self.index.needs_faces():
+            self.verdict.set("Matching was improved: looking for faces in your photos (one time) so very tightly cropped copies are caught. "
+                             "Please wait for it to finish (you can press Cancel and it will continue next time).")
+            self.rescan()
 
     # ---------- drag and drop ----------
     def _enable_drop(self):
@@ -435,7 +439,7 @@ class App(_Base):
 
         def run():
             try:
-                s = self.index.rescan(lambda d, t, f: self.q.put(("progress", d, t)), self.cancel)
+                s = self.index.rescan(lambda d, t, f: self.q.put(("progress", d, t, f)), self.cancel)
                 self.q.put(("done", s))
             except Exception as e:
                 self.q.put(("error", str(e)))
@@ -447,9 +451,12 @@ class App(_Base):
             while True:
                 msg = self.q.get_nowait()
                 if msg[0] == "progress":
-                    _, d, t = msg
+                    _, d, t, what = msg
                     self.progress.config(maximum=max(t, 1), value=d)
-                    self.status.set(f"Indexing new photos: {d:,} of {t:,}")
+                    if what == "faces":
+                        self.status.set(f"Finding faces, so even very tightly cropped copies are caught (one time): {d:,} of {t:,}")
+                    else:
+                        self.status.set(f"Indexing new photos: {d:,} of {t:,}")
                 elif msg[0] == "done":
                     self._finish_scan(msg[1])
                 elif msg[0] == "error":
@@ -754,6 +761,23 @@ def selftest(out_path):
         assert [os.path.basename(p) for p in app.exact] == ["x.png"], app.exact  # byte-identical copy
         assert app._cards[1][0].startswith("EXACT MATCH"), app._cards[:2]
         msgs.append("exact ok")
+        # extremely cropped copies are found through their faces: needs the models and OpenCV inside the build
+        assert core.faces.AVAILABLE, "face models or OpenCV missing from the build"
+        face_src = core.faces.resource_path("selfdata/solvay_1927.jpg")
+        if not os.path.isfile(face_src):
+            face_src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests", "data", "solvay_1927.jpg")
+        fimg = Image.open(face_src).convert("RGB")
+        fw_, fh_ = fimg.size
+        tight = os.path.join(d, "tight crop.jpg")
+        fimg.crop((int(fw_ * .25), int(fh_ * .45), int(fw_ * .7), int(fh_ * .75))).resize((int(fw_ * .45 * 1.4), int(fh_ * .3 * 1.4))).save(tight, quality=88)
+        fpath = os.path.join(d, "faces source.jpg")
+        fimg.save(fpath, quality=95)
+        idx.add_file(fpath)
+        assert idx._db.execute("SELECT COUNT(*) FROM faces").fetchone()[0] > 5, "no faces found in the test photo"
+        found, _ = idx.search(tight, top=3)
+        assert idx.crop_error is None, idx.crop_error
+        assert found and found[0][1] == os.path.normpath(fpath) and found[0][0] >= 0.8, found[:2]
+        msgs.append("faces ok")
         # the cropped-copy check must really run inside the packaged app (its errors are otherwise silent)
         sm = Image.fromarray((rng.random((9, 12)) * 255).astype("uint8")).resize((640, 480), Image.BICUBIC)
         sm_path, sm_crop = os.path.join(d, "smooth.png"), os.path.join(d, "smooth crop.png")

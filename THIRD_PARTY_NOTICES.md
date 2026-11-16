@@ -44,6 +44,9 @@ the LGPL-2.1 (license text in `licenses\rawpy\LICENSE.LibRaw`; source: https://g
 | pillow-heif | BSD-3-Clause (the bundled binaries are listed above) | https://github.com/bigcat88/pillow_heif |
 | pypdfium2 | BSD-3-Clause or Apache-2.0, with PDFium (BSD-3-Clause / Apache-2.0) and its dependencies | https://github.com/pypdfium2-team/pypdfium2 |
 | rawpy | MIT, bundling LibRaw (above) | https://github.com/letmaik/rawpy |
+| opencv-python-headless | Apache-2.0 (its wheels also bundle FFmpeg, LGPL-2.1, and other libraries; see `licenses\\opencv_python_headless`) | https://github.com/opencv/opencv-python |
+| YuNet face detector model (`models\\yunet.onnx`) | MIT | https://github.com/ShiqiYu/libfacedetection |
+| SFace face recognition model (`models\\sface.onnx`) | Apache-2.0 | https://github.com/opencv/opencv_zoo |
 | tkinterdnd2 | MIT, bundling tkdnd | https://github.com/Eliav2/tkinterdnd2 |
 
 ## Runtime and build tools

@@ -28,7 +28,7 @@ jobs:
         run: python -m pytest -q
 
       - name: Build app folder
-        run: pyinstaller --noconfirm --windowed --name PhotoDupeChecker --icon icon.ico --add-data "icon.ico;." --collect-all tkinterdnd2 --collect-all tifffile --collect-all imagecodecs --collect-all pillow_heif --collect-all pypdfium2 --collect-all rawpy app.py
+        run: pyinstaller --noconfirm --windowed --name PhotoDupeChecker --icon icon.ico --add-data "icon.ico;." --add-data "models;models" --add-data "tests/data/solvay_1927.jpg;selfdata" --collect-all cv2 --collect-all tkinterdnd2 --collect-all tifffile --collect-all imagecodecs --collect-all pillow_heif --collect-all pypdfium2 --collect-all rawpy app.py
 
       - name: Collect license texts into the app folder
         run: python collect_licenses.py dist/PhotoDupeChecker
@@ -168,7 +168,7 @@ jobs:
       - name: Build the app
         run: |
           python make_icns.py icon.icns
-          pyinstaller --noconfirm --windowed --name "Photo Duplicate Checker" --icon icon.icns --osx-bundle-identifier io.github.battlingamazons.photoduplicatechecker --add-data "icon.ico:." --collect-all tkinterdnd2 --collect-all tifffile --collect-all imagecodecs --collect-all pillow_heif --collect-all pypdfium2 --collect-all rawpy app.py
+          pyinstaller --noconfirm --windowed --name "Photo Duplicate Checker" --icon icon.icns --osx-bundle-identifier io.github.battlingamazons.photoduplicatechecker --add-data "icon.ico:." --add-data "models:models" --add-data "tests/data/solvay_1927.jpg:selfdata" --collect-all cv2 --collect-all tkinterdnd2 --collect-all tifffile --collect-all imagecodecs --collect-all pillow_heif --collect-all pypdfium2 --collect-all rawpy app.py
 
       - name: Stamp the version into the app
         run: |

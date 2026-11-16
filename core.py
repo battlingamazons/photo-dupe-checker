@@ -13,6 +13,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageOps
 
+import faces
+
 Image.MAX_IMAGE_PIXELS = None  # big archival TIFFs are expected
 
 # Formats Pillow reads on its own.
@@ -556,6 +558,88 @@ def _crop_picks(qj, qb, dc, n=8):
     return out[:n]
 
 
+# ---- crops far beyond the normal range: match by faces, then confirm with the pixels ----
+FACE_SAME = 0.75      # two faces this alike (cosine) are probably the same pixels
+FACE_K = 12           # at most this many different candidate photos are checked per scan
+FACE_SKIP = 0.90      # candidates that already score this well need no extra check
+_RELS = (0.85, 0.92, 1.0, 1.08, 1.18)
+
+
+def _face_rgb(path):
+    return np.asarray(load_image(path, max_side=faces.DETECT_SIDE).convert("RGB"))
+
+
+def face_data(path):
+    """(turn, [(box fractions, embedding)], gray picture turned the way the faces were found)."""
+    rgb = _face_rgb(path)
+    rot, found = faces.find(rgb)
+    gray = None
+    if found:
+        gray = np.asarray(Image.fromarray(faces.turn(rgb, rot)).convert("L"), dtype=np.float32)
+    return rot, [(box, emb) for _s, box, emb in found], gray
+
+
+def _ncc_in_window(img, tmpl, expect, tol):
+    """Best normalised correlation of tmpl inside img, only counting positions near `expect`."""
+    import cv2
+
+    if tmpl.shape[0] < 12 or tmpl.shape[1] < 12 or tmpl.shape[0] > img.shape[0] or tmpl.shape[1] > img.shape[1]:
+        return 0.0
+    res = np.nan_to_num(cv2.matchTemplate(img, tmpl, cv2.TM_CCOEFF_NORMED), nan=0.0, posinf=0.0, neginf=0.0)
+    x0, x1 = max(0, int(expect[0] - tol)), min(res.shape[1], int(expect[0] + tol) + 1)
+    y0, y1 = max(0, int(expect[1] - tol)), min(res.shape[0], int(expect[1] + tol) + 1)
+    if x1 <= x0 or y1 <= y0:
+        return 0.0
+    return float(res[y0:y1, x0:x1].max())
+
+
+def _place_score(Qg, Sg, pairs):
+    """How well the two pictures agree once the faces are lined up (normalised correlation, -1..1).
+    pairs: [(query face box, stored face box, similarity)] - boxes are fractions of each picture."""
+    import cv2
+
+    Hq, Wq = Qg.shape
+    Hs, Ws = Sg.shape
+    ratios = [
+        float(np.sqrt((sb[2] * Ws / (qb[2] * Wq)) * (sb[3] * Hs / (qb[3] * Hq)))) for qb, sb, _ in pairs
+    ]  # stored pixels per query pixel
+    r0 = float(np.median(ratios))
+    qb, sb, _ = max(pairs, key=lambda p: p[2])
+    qc = np.array([(qb[0] + qb[2] / 2) * Wq, (qb[1] + qb[3] / 2) * Hq])
+    sc = np.array([(sb[0] + sb[2] / 2) * Ws, (sb[1] + sb[3] / 2) * Hs])
+    fw = sb[2] * Ws
+    cache = {}
+
+    def at(rel):
+        r = r0 * rel
+        if Wq * r <= Ws + 1 and Hq * r <= Hs + 1:  # the scan is the smaller piece: find it inside the stored photo
+            w = min(1.0, 640.0 / max(Hs, Ws))
+            key = ("A", w)
+            if key not in cache:
+                cache[key] = cv2.resize(Sg, None, fx=w, fy=w, interpolation=cv2.INTER_AREA)
+            tmpl = cv2.resize(Qg, None, fx=r * w, fy=r * w, interpolation=cv2.INTER_AREA)
+            return _ncc_in_window(cache[key], tmpl, sc * w - qc * r * w, 1.5 * fw * w + 4)
+        if Ws / r <= Wq + 1 and Hs / r <= Hq + 1:  # the stored photo is the smaller piece
+            w = min(1.0, 640.0 / max(Hq, Wq))
+            key = ("B", w)
+            if key not in cache:
+                cache[key] = cv2.resize(Qg, None, fx=w, fy=w, interpolation=cv2.INTER_AREA)
+            tmpl = cv2.resize(Sg, None, fx=w / r, fy=w / r, interpolation=cv2.INTER_AREA)
+            return _ncc_in_window(cache[key], tmpl, qc * w - sc * w / r, 1.5 * fw * w / r + 4)
+        return 0.0
+
+    scored = [(at(rel), rel) for rel in _RELS]
+    n, rel = max(scored)
+    for f in (0.97, 0.985, 1.015, 1.03):  # fine-tune the size
+        n = max(n, at(rel * f))
+    return n
+
+
+def face_report(n):
+    """Turn a correlation into the same 0..1 scale the other scores use."""
+    return 0.0 if n < 0.55 else 0.60 + min((n - 0.55) / 0.35, 1.0) * 0.40
+
+
 class Index:
     def __init__(self, db_path=None):
         self.db_path = str(db_path or default_db_path())
@@ -572,6 +656,7 @@ class Index:
                 self.upgraded = self._db.execute("SELECT COUNT(*) FROM files").fetchone()[0] > 0
                 self._db.execute("DROP TABLE files")
             self._db.execute("DROP TABLE IF EXISTS thumbs")
+            self._db.execute("DROP TABLE IF EXISTS faces")
             self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self._db.executescript(
             """
@@ -579,16 +664,22 @@ class Index:
                 path TEXT PRIMARY KEY, folder TEXT, size INTEGER, mtime REAL,
                 desc BLOB NOT NULL, sha TEXT, cdesc BLOB);
             CREATE TABLE IF NOT EXISTS thumbs (path TEXT PRIMARY KEY, img BLOB NOT NULL);
+            CREATE TABLE IF NOT EXISTS faces (path TEXT, bx REAL, by REAL, bw REAL, bh REAL, rot INTEGER, emb BLOB);
+            CREATE INDEX IF NOT EXISTS faces_path ON faces(path);
             CREATE INDEX IF NOT EXISTS files_folder ON files(folder);
             """
         )
         if "sha" not in [r[1] for r in self._db.execute("PRAGMA table_info(files)")]:
             self._db.execute("ALTER TABLE files ADD COLUMN sha TEXT")  # index made before exact matching
+        if "fdone" not in [r[1] for r in self._db.execute("PRAGMA table_info(files)")]:
+            self._db.execute("ALTER TABLE files ADD COLUMN fdone INTEGER")  # faces are looked for after the main pass
         self._db.execute("CREATE INDEX IF NOT EXISTS files_sha ON files(sha)")
         self._db.commit()
         self._cache = None
         self.last_cropped = set()
         self.crop_error = None  # set when the cropped-copy check could not run
+        self._fcache = None
+        self._fkey = None
 
     # ---- folders ----
     def folders(self):
@@ -658,6 +749,7 @@ class Index:
                 with self._lock:
                     self._db.executemany("DELETE FROM files WHERE path = ?", [(p,) for p in gone])
                     self._db.executemany("DELETE FROM thumbs WHERE path = ?", [(p,) for p in gone])
+                    self._db.executemany("DELETE FROM faces WHERE path = ?", [(p,) for p in gone])
                     self._db.commit()
                 summary["removed"] += len(gone)
 
@@ -706,6 +798,11 @@ class Index:
             with self._lock:
                 self._db.commit()
                 self._cache = None
+        if not (cancel and cancel.is_set()):
+            try:
+                self.scan_faces(progress, cancel)
+            except Exception as e:  # noqa: BLE001  (faces are an extra; never fail the scan over them)
+                summary.setdefault("notes", []).append(f"Face matching could not run: {e}")
         return summary
 
     def add_file(self, path):
@@ -722,6 +819,10 @@ class Index:
             self._db.execute("INSERT OR REPLACE INTO thumbs (path, img) VALUES (?,?)", (path, th))
             self._db.commit()
             self._cache = None
+        try:
+            self.scan_faces(only=[path])
+        except Exception:  # noqa: BLE001
+            pass
 
     # ---- searching ----
     def find_exact(self, path):
@@ -796,6 +897,129 @@ class Index:
                     self.last_cropped.add(paths[i])
                 best[i] = rep
 
+    # ---- faces (extreme crops) ----
+    def needs_faces(self):
+        """How many indexed photos have not been checked for faces yet."""
+        if not faces.AVAILABLE:
+            return 0
+        with self._lock:
+            return self._db.execute("SELECT COUNT(*) FROM files WHERE fdone IS NULL").fetchone()[0]
+
+    def scan_faces(self, progress=None, cancel=None, only=None):
+        """Look for faces in photos that haven't been checked yet and remember them."""
+        if not faces.AVAILABLE:
+            return 0
+        with self._lock:
+            if only is None:
+                todo = [r[0] for r in self._db.execute("SELECT path FROM files WHERE fdone IS NULL")]
+            else:
+                todo = list(only)
+
+        def work(p):
+            if cancel and cancel.is_set():
+                return p, None
+            try:
+                rot, found, _g = face_data(p)
+                return p, (rot, found)
+            except Exception:  # noqa: BLE001  (unreadable photo: no faces)
+                return p, (0, [])
+
+        done = 0
+        with ThreadPoolExecutor(max_workers=max(1, min(4, (os.cpu_count() or 2) - 1))) as pool:
+            for p, res in pool.map(work, todo):
+                if res is None:
+                    break
+                done += 1
+                rot, found = res
+                with self._lock:
+                    self._db.execute("DELETE FROM faces WHERE path = ?", (p,))
+                    for box, emb in found:
+                        self._db.execute(
+                            "INSERT INTO faces (path, bx, by, bw, bh, rot, emb) VALUES (?,?,?,?,?,?,?)",
+                            (p, *box, rot, emb.astype(np.float32).tobytes()),
+                        )
+                    self._db.execute("UPDATE files SET fdone = 1 WHERE path = ?", (p,))
+                    if done % 200 == 0:
+                        self._db.commit()
+                if progress:
+                    progress(done, len(todo), "faces")
+        with self._lock:
+            self._db.commit()
+            self._fcache = None
+        return done
+
+    def _face_arrays(self, cache):
+        with self._lock:
+            if self._fcache is None or self._fkey is not cache:
+                paths, _v, lookup, _c = cache
+                rows = self._db.execute("SELECT path, bx, by, bw, bh, rot, emb FROM faces").fetchall()
+                rows = [r for r in rows if os.path.normcase(r[0]) in lookup]
+                n = len(rows)
+                emb = np.zeros((n, 128), np.float32)
+                owner = np.zeros(n, np.int64)
+                boxes = []
+                for i, r in enumerate(rows):
+                    emb[i] = np.frombuffer(r[6], dtype=np.float32)
+                    owner[i] = lookup[os.path.normcase(r[0])]
+                    boxes.append((r[1], r[2], r[3], r[4], r[5]))
+                self._fcache, self._fkey = (emb, owner, boxes), cache
+            return self._fcache
+
+    def _face_pass(self, path, cache, own, best):
+        """Raise the score of stored photos that hold the same faces as the scan, in the same pixels."""
+        if not faces.AVAILABLE:
+            return
+        femb, fowner, fboxes = self._face_arrays(cache)
+        if len(femb) == 0:
+            return
+        paths = cache[0]
+        qrot, qfound, qgray = face_data(path)
+        if not qfound:
+            return
+        Q = np.stack([e for _b, e in qfound])
+        sims = femb @ Q.T  # stored faces x scan faces
+        hits = {}
+        for m, j in zip(*np.nonzero(sims >= FACE_SAME)):
+            i = int(fowner[m])
+            if i == own or best[i] >= FACE_SKIP:
+                continue
+            hits.setdefault(i, []).append((qfound[j][0], fboxes[m], float(sims[m, j])))
+        if not hits:
+            return
+        ranked = sorted(hits, key=lambda i: (-len({id(h[0]) for h in hits[i]}), -sum(h[2] for h in hits[i])))
+        with self._lock:
+            shas = {}
+            for k in range(0, len(ranked), 200):
+                chunk = ranked[k : k + 200]
+                q = ",".join("?" * len(chunk))
+                for p, sha in self._db.execute(f"SELECT path, sha FROM files WHERE path IN ({q})", [paths[i] for i in chunk]):
+                    shas[p] = sha
+        seen, picks = set(), []
+        for i in ranked:  # copies of one photo in several folders only need checking once
+            key = shas.get(paths[i]) or paths[i]
+            if key in seen:
+                continue
+            seen.add(key)
+            picks.append(i)
+            if len(picks) >= FACE_K:
+                break
+        by_key = {}
+        for i in picks:
+            try:
+                srgb = _face_rgb(paths[i])
+                srot = hits[i][0][1][4]
+                sgray = np.asarray(Image.fromarray(faces.turn(srgb, srot)).convert("L"), dtype=np.float32)
+                pairs = [(qb, sb[:4], s) for qb, sb, s in hits[i]]
+                by_key[shas.get(paths[i]) or paths[i]] = face_report(_place_score(qgray, sgray, pairs))
+            except Exception:  # noqa: BLE001
+                continue
+        for i in ranked:  # every copy of a checked photo gets the result
+            rep = by_key.get(shas.get(paths[i]) or paths[i], 0.0)
+            if rep > best[i]:
+                if rep > best[i] + 0.05:
+                    self.last_cropped.add(paths[i])
+                best[i] = rep
+
     def search(self, path, top=5, crop=None, also_whole=False, use_crop=True):
         """Return (matches, already_indexed). matches = [(score 0..1, path)], best first.
         crop: only look at this part of the scan. also_whole: additionally try the whole scan
@@ -818,6 +1042,11 @@ class Index:
                 self._crop_pass(path, crop, paths, cviews, own, best)
             except Exception as e:  # noqa: BLE001  (the extra pass must never break a search)
                 self.crop_error = f"{type(e).__name__}: {e}"
+            try:
+                if crop is None:
+                    self._face_pass(path, self._cache, own, best)
+            except Exception as e:  # noqa: BLE001
+                self.crop_error = f"faces: {type(e).__name__}: {e}"
         if own is not None:
             best[own] = -9.0  # never match a file against itself
         k = min(top, len(best))

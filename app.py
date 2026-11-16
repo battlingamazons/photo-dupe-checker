@@ -94,108 +94,52 @@ def thumbnail(path, size=THUMB):
     return ImageTk.PhotoImage(img)
 
 
-class MoreWindow(tk.Toplevel):
-    """Every match found, as a scrolling grid that fills the window: identical copies first, then
-    differently cropped versions, then the other close matches - all those at least as similar as
-    the chosen cutoff. Only the cards on screen are built and their pictures load in the
-    background, so hundreds of matches stay responsive."""
+class CardGrid(ttk.Frame):
+    """A scrolling grid of photo cards that fills its space. Only the cards on screen are built and
+    their pictures load in the background, so hundreds of matches stay responsive."""
 
     THUMB = 190
     CELL_W, CELL_H = THUMB + 40, THUMB + 150
 
-    def __init__(self, parent, entries, name, default_min):
-        """entries: [(kind, percent, heading, path)] with kind 'exact' | 'crop' | 'other'."""
+    def __init__(self, parent, on_card=None):
+        """cards: [(heading, path, crop, is_query)]; on_card(widget) is called for every card built."""
         super().__init__(parent)
-        self.title("More matches")
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        self.geometry(f"{min(1100, sw - 60)}x{min(700, sh - 150)}")
-        self.entries, self.name = entries, name
+        self.on_card = on_card
         self.cards, self.cols, self.x0 = [], 0, 0
         self._items = {}
         self._live, self._photos, self._thumbs, self._pending = {}, {}, {}, set()
         self._done = queue.Queue()
         self._pool = ThreadPoolExecutor(max_workers=3)
-        self._job = None
-        self.summary = tk.StringVar()
-        ttk.Label(self, textvariable=self.summary, font=("Segoe UI", 11, "bold"), wraplength=1000, justify="left").pack(fill="x", padx=12, pady=(10, 2))
-        bar_row = ttk.Frame(self)
-        bar_row.pack(fill="x", padx=12, pady=(0, 4))
-        ttk.Label(bar_row, text="Show matches that are at least").pack(side="left")
-        self.minvar = tk.StringVar(value=str(default_min))
-        self.spin = ttk.Spinbox(bar_row, from_=0, to=100, increment=5, width=4, textvariable=self.minvar, command=self._changed)
-        self.spin.pack(side="left", padx=4)
-        ttk.Label(bar_row, text=f"% similar   (identical copies are always shown; 0 shows everything, up to the best {MORE_MAX})", foreground="#555").pack(side="left")
-        self.minvar.trace_add("write", lambda *a: self._changed())
-        self.spin.bind("<FocusIn>", lambda e: self.after_idle(lambda: self.spin.selection_range(0, "end")))
-        self.spin.bind("<Control-a>", lambda e: (self.spin.selection_range(0, "end"), "break")[1])
-        self.bind("<Return>", lambda e: self.rebuild())
-        body = ttk.Frame(self)
-        body.pack(fill="both", expand=True, padx=8, pady=6)
-        self.canvas = tk.Canvas(body, highlightthickness=0, yscrollincrement=60)
-        self.bar = ttk.Scrollbar(body, orient="vertical", command=self.canvas.yview)
+        self.canvas = tk.Canvas(self, highlightthickness=0, yscrollincrement=60)
+        self.bar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=self._on_scroll)
         self.bar.pack(side="right", fill="y")
         self.canvas.pack(side="left", fill="both", expand=True)
         self.canvas.bind("<Configure>", lambda e: self._layout())
-        self.bind("<MouseWheel>", self._wheel)
-        self.bind("<Button-4>", lambda e: self.canvas.yview_scroll(-3, "units"))
-        self.bind("<Button-5>", lambda e: self.canvas.yview_scroll(3, "units"))
-        self.bind("<Prior>", lambda e: self.canvas.yview_scroll(-8, "units"))
-        self.bind("<Next>", lambda e: self.canvas.yview_scroll(8, "units"))
-        self.bind("<Escape>", lambda e: self.destroy())
+        self.bind_all("<MouseWheel>", self._wheel, add="+")
+        self.bind_all("<Button-4>", lambda e: self._wheel_units(-3), add="+")
+        self.bind_all("<Button-5>", lambda e: self._wheel_units(3), add="+")
         self.bind("<Destroy>", self._on_destroy)
-        ttk.Button(self, text="Close", command=self.destroy).pack(pady=(0, 8))
-        self.rebuild()
-        self.after(60, self._take_focus)
         self.after(40, self._poll)
 
-    # ---- the cutoff ----
-    def _take_focus(self):
-        try:
-            self.lift()
-            self.focus_force()
-            self.spin.focus_set()
-        except tk.TclError:
-            pass
-
-    def minimum(self):
-        try:
-            return max(0, min(100, int(float(self.minvar.get()))))
-        except ValueError:
-            return None
-
-    def _changed(self):
-        if self._job:
-            self.after_cancel(self._job)
-        self._job = self.after(300, self.rebuild)
-
-    def set_min(self, pct):
-        self.minvar.set(str(pct))
-        if self._job:
-            self.after_cancel(self._job)
-            self._job = None
-        self.rebuild()
-
-    def rebuild(self):
-        self._job = None
-        lo = self.minimum()
-        if lo is None:
-            return
-        shown = [x for x in self.entries if x[0] == "exact" or x[1] >= lo]
-        self.cards = [(h, p) for _k, _pc, h, p in shown]
-        n_ex = sum(1 for x in shown if x[0] == "exact")
-        n_cr = sum(1 for x in shown if x[0] == "crop")
-        parts = []
-        if n_ex:
-            parts.append(f"{n_ex} identical cop{'y' if n_ex == 1 else 'ies'}")
-        if n_cr:
-            parts.append(f"{n_cr} differently cropped")
-        parts.append(f"{len(shown) - n_ex - n_cr} other matches")
-        hidden = len(self.entries) - len(shown)
-        self.summary.set(f"{self.name}: " + ", ".join(parts) + (f"  ({hidden} below {lo}% hidden)" if hidden else ""))
-        self._clear_cards()
-        self.canvas.yview_moveto(0)
+    # ---- content ----
+    def set_cards(self, cards, reset=True):
+        self.cards = list(cards)
+        if reset:
+            self._clear_cards()
+            self.canvas.yview_moveto(0)
         self._layout()
+
+    def see(self, i):
+        """Scroll down just far enough that card i's row is on screen."""
+        if not self.cols:
+            return
+        top = (i // self.cols) * self.CELL_H
+        view = self.canvas.canvasy(0)
+        if top < view or top + self.CELL_H > view + self.canvas.winfo_height():
+            total = max(-(-len(self.cards) // self.cols) * self.CELL_H, 1)
+            self.canvas.yview_moveto(top / total)
+            self._update_visible()
 
     # ---- the grid: only what is on screen exists ----
     def _clear_cards(self):
@@ -243,7 +187,7 @@ class MoreWindow(tk.Toplevel):
                 self._make_card(i)
 
     def _make_card(self, i):
-        heading, path = self.cards[i]
+        heading, path, crop, is_query = self.cards[i]
         t = self.THUMB
         f = tk.Frame(self.canvas, relief="groove", borderwidth=2)
         f.pack_propagate(False)
@@ -251,7 +195,8 @@ class MoreWindow(tk.Toplevel):
         pic = ttk.Label(f, text="...", anchor="center")
         pic.pack(pady=4)
         ttk.Label(f, text=shorten(os.path.basename(path), 34), wraplength=t, justify="center").pack()
-        ttk.Label(f, text=shorten(os.path.dirname(path), 42), wraplength=t, foreground="#666", justify="center").pack()
+        if not is_query:
+            ttk.Label(f, text=shorten(os.path.dirname(path), 42), wraplength=t, foreground="#666", justify="center").pack()
         row = ttk.Frame(f)
         row.pack(pady=4)
         ttk.Button(row, text="Open", width=6, command=lambda: open_path(path)).pack(side="left", padx=2)
@@ -259,39 +204,48 @@ class MoreWindow(tk.Toplevel):
         r, c = divmod(i, self.cols)
         self._items[i] = self.canvas.create_window(self.x0 + c * self.CELL_W + 4, r * self.CELL_H + 4, window=f, anchor="nw", width=self.CELL_W - 8, height=self.CELL_H - 8)
         self._live[i] = (f, pic)
-        if path in self._thumbs:
+        if self.on_card:
+            self.on_card(f)
+        key = (path, crop)
+        if key in self._thumbs:
             self._show(i)
-        elif path not in self._pending:
-            self._pending.add(path)
-            self._pool.submit(self._load, path)
+        elif key not in self._pending:
+            self._pending.add(key)
+            self._pool.submit(self._load, path, crop)
 
     # ---- pictures load in the background ----
-    def _load(self, path):
+    def _load(self, path, crop):
         try:
-            img = load_pil_thumb(path, self.THUMB)
+            side = self.THUMB
+            if crop:  # a small part of the scan needs a bigger source picture to look sharp
+                side = min(1600, int(self.THUMB / max(min(crop[2] - crop[0], crop[3] - crop[1]), 0.1)) + 1)
+            img = load_pil_thumb(path, side)
+            if crop:
+                img = core.crop_image(img, crop)
+                img.thumbnail((self.THUMB, self.THUMB))
         except Exception:  # noqa: BLE001
             img = None
-        self._done.put((path, img))
+        self._done.put(((path, crop), img))
 
     def _poll(self):
         if not self.winfo_exists():
             return
         for _ in range(6):
             try:
-                path, img = self._done.get_nowait()
+                key, img = self._done.get_nowait()
             except queue.Empty:
                 break
-            self._pending.discard(path)
+            self._pending.discard(key)
             if len(self._thumbs) > 300:
                 self._thumbs.pop(next(iter(self._thumbs)))
-            self._thumbs[path] = img
-            for i in [i for i in self._live if self.cards[i][1] == path]:
+            self._thumbs[key] = img
+            for i in [i for i in self._live if self.cards[i][1:3] == key]:
                 self._show(i)
         self.after(30, self._poll)
 
     def _show(self, i):
         _f, pic = self._live[i]
-        img = self._thumbs.get(self.cards[i][1])
+        img = self._thumbs.get(self.cards[i][1:3])
         if img is None:
             pic.config(text="(cannot preview)")
             self._photos[i] = None
@@ -308,9 +262,31 @@ class MoreWindow(tk.Toplevel):
         if e.widget is self:
             self._pool.shutdown(wait=False, cancel_futures=True)
 
+    def _over(self, e):
+        w = e.widget
+        while isinstance(w, tk.Misc):
+            if w is self:
+                return True
+            w = w.master
+        return False
+
     def _wheel(self, e):
+        if not self._over(e):
+            return
         step = -1 * (e.delta // 120) if abs(e.delta) >= 120 else (-1 if e.delta > 0 else 1)
         self.canvas.yview_scroll(step * 3, "units")
+
+    def _wheel_units(self, n):
+        try:
+            x, y = self.winfo_pointerxy()
+            w = self.winfo_containing(x, y)
+        except (tk.TclError, KeyError):
+            return
+        while isinstance(w, tk.Misc):
+            if w is self:
+                self.canvas.yview_scroll(n, "units")
+                return
+            w = w.master
 
 
 class CropDialog(tk.Toplevel):
@@ -491,11 +467,9 @@ class App(_Base):
         self.query_auto = False
         self.searching = False
         self._search_token = 0
-        self._images = []
-        self._pil_cache = {}
         self._cards = []
-        self._layout_job = None
-        self._layout_size = (0, 0)
+        self.entries, self.shown, self.cutoff = [], [], 80
+        self._setting = False
         self._reindex_note = False
 
         self._build()
@@ -599,14 +573,24 @@ class App(_Base):
 
         more_bar = ttk.Frame(self)
         more_bar.pack(side="bottom", fill="x", padx=10, pady=(0, 6))
-        ttk.Label(more_bar, text="Only the best few matches fit above. The button lists all of them, down to a similarity you choose.", foreground="#555").pack(side="left")
-        self.btn_more = ttk.Button(more_bar, text="Show more matches...", command=self.show_more, state="disabled")
-        self.btn_more.pack(side="right")
+        self.more_bar = more_bar
+        self.btn_more = ttk.Button(more_bar, text="Show more matches", command=self.show_more, state="disabled")
+        self.btn_more.pack(side="left")
+        ttk.Label(more_bar, text="  or show everything at least").pack(side="left")
+        self.minvar = tk.StringVar(value="80")
+        self.spin = ttk.Spinbox(more_bar, from_=0, to=100, increment=5, width=4, textvariable=self.minvar, command=self._cutoff_changed, state="disabled")
+        self.spin.pack(side="left", padx=4)
+        ttk.Label(more_bar, text="% similar").pack(side="left")
+        self.minvar.trace_add("write", lambda *a: self._cutoff_changed())
+        self.spin.bind("<FocusIn>", lambda e: self.after_idle(lambda: self.spin.selection_range(0, "end")))
+        self.spin.bind("<Control-a>", lambda e: (self.spin.selection_range(0, "end"), "break")[1])
+        self.more_info = tk.StringVar()
+        ttk.Label(more_bar, textvariable=self.more_info, foreground="#555").pack(side="right")
+        self._cutoff_job = None
 
-        self.results = ttk.Frame(self)
-        self.results.pack(fill="both", expand=True, padx=10, pady=6)
-        self.results.grid_propagate(False)
-        self.results.bind("<Configure>", self._on_results_resize)
+        self.grid_view = CardGrid(self, on_card=self._register_drop if DND_FILES else None)
+        self.grid_view.pack(fill="both", expand=True, padx=10, pady=6)
+        self.bind("<Configure>", lambda e: e.widget is self and self.verdict_label.config(wraplength=max(300, self.winfo_width() - 30)))
 
     def about(self):
         notes = find_notices()
@@ -763,6 +747,7 @@ class App(_Base):
         self.btn_check.config(state="disabled")
         self.btn_crop.config(state="disabled")
         self.btn_more.config(state="disabled")
+        self.spin.config(state="disabled")
         self.btn_addfile.config(state="disabled")
         self.verdict_label.config(fg="black")
         self.verdict.set(f"Checking {os.path.basename(path)} against {self.index.count():,} photos...")
@@ -801,11 +786,13 @@ class App(_Base):
     # ---------- results ----------
     def show_results(self):
         sens = self.sens.get()
-        self._pil_cache = {k: v for k, v in self._pil_cache.items() if k == self.query_path}
         if not self.matches and not self.exact:
-            for w in self.results.winfo_children():
-                w.destroy()
             self._cards = []
+            self.entries, self.shown = [], []
+            self.grid_view.set_cards([])
+            self.btn_more.config(state="disabled")
+            self.spin.config(state="disabled")
+            self.more_info.set("")
             self.verdict.set("No other photos in the index to compare against.")
             return
         top = self.matches[0][0] if self.matches else 0.0
@@ -842,104 +829,93 @@ class App(_Base):
         self.verdict.set(text)
         self.verdict_label.config(fg=COLORS.get(v, COLORS["likely duplicate"]))
         self.btn_addfile.config(state="normal" if not self.already else "disabled")
-        self.btn_more.config(state="normal")
-        exact_cards = self.exact[:2]
-        slots = max(1, 4 - len(exact_cards))
-        crop_paths = {p for _s, p in crops}
-        others = [(s, p) for s, p in self.matches if p not in self.cropped][: max(0, slots - len(crops))] if crops else [
-            (s, p) for s, p in self.matches
-        ][:slots]
-        shown = sorted(others + crops, key=lambda t: -t[0])[:slots]
-        self._cards = [("THIS SCAN" + ((" (auto-cropped)" if self.query_auto else " (cropped)") if self.query_crop else ""), self.query_path)]
-        self._cards += [("EXACT MATCH - identical file", p) for p in exact_cards]
-        self._cards += [
-            (f"Same photo, cropped - {core.similarity_percent(s)}%" if p in crop_paths else f"{core.similarity_percent(s)}% similar - {core.verdict(s, sens)}", p)
-            for s, p in shown
-        ]
-        self._layout_cards()
+        self.entries = self.more_entries()
+        self._start_grid()
 
-    def _on_results_resize(self, event):
-        if (event.width, event.height) == self._layout_size:
-            return
-        if self._layout_job:
-            self.after_cancel(self._layout_job)
-        self._layout_job = self.after(150, self._layout_cards)
-
-    def _layout_cards(self):
-        """Pick columns/rows and thumbnail size so every card fits on screen without scrolling."""
-        self._layout_job = None
-        for w in self.results.winfo_children():
-            w.destroy()
-        self._images = []
-        if not self._cards:
-            return
-        self.update_idletasks()
-        W = self.results.winfo_width()
-        H = self.results.winfo_height()
-        if W < 50 or H < 50:  # not laid out yet
-            W, H = max(self.winfo_width() - 20, 600), max(self.winfo_height() - 380, 260)
-        self._layout_size = (W, H)
-        self.verdict_label.config(wraplength=max(300, self.winfo_width() - 30))
-        n = len(self._cards)
-        best = None
-        for cols in range(n, 0, -1):  # prefer one row; wrap only if that clearly gives bigger photos
-            rows = math.ceil(n / cols)
-            t = min((W - 8) // cols - CARD_X, (H - 8) // rows - CARD_Y, THUMB_MAX)
-            if best is None or t > best[0] + 4:
-                best = (t, cols)
-        t, cols = best
-        t = max(t, THUMB_MIN)
-        for c in range(cols):
-            self.results.columnconfigure(c, weight=1)
-        for i, (heading, path) in enumerate(self._cards):
-            self._card(i // cols, i % cols, heading, path, t, is_query=(i == 0))
-
-    def _pil(self, path):
-        if path not in self._pil_cache:
-            self._pil_cache[path] = load_pil_thumb(path)
-        return self._pil_cache[path]
-
-    def _card(self, row, col, heading, path, t, is_query=False):
-        f = ttk.Frame(self.results, padding=6, relief="groove")
-        f.grid(row=row, column=col, sticky="n", padx=4, pady=4)
-        ttk.Label(f, text=heading, font=("Segoe UI", 10, "bold"), wraplength=max(t, 160), justify="center").pack()
-        try:
-            img = self._pil(path).copy()
-            if is_query:
-                img = core.crop_image(img, self.query_crop)
-            img.thumbnail((t, t))
-            photo = ImageTk.PhotoImage(img)
-            self._images.append(photo)
-            ttk.Label(f, image=photo).pack(pady=4)
-        except Exception:  # noqa: BLE001
-            ttk.Label(f, text="(cannot preview)", width=max(10, t // 8)).pack(pady=30)
-        ttk.Label(f, text=shorten(os.path.basename(path), 40), wraplength=max(t, 160), justify="center").pack()
-        if not is_query:
-            ttk.Label(f, text=shorten(os.path.dirname(path), 52), wraplength=max(t, 160), foreground="#666", justify="center").pack()
-        row_f = ttk.Frame(f)
-        row_f.pack(pady=4)
-        side = "left" if t >= 150 else "top"
-        ttk.Button(row_f, text="Open", width=7, command=lambda: open_path(path)).pack(side=side, padx=2, pady=1)
-        ttk.Button(row_f, text="Show in folder", command=lambda: reveal(path)).pack(side=side, padx=2, pady=1)
-        if DND_FILES:
-            self._register_drop(f)
-
+    # ---------- the grid in the main window ----------
     def more_entries(self):
-        """Everything found as (kind, percent, heading, path): identical copies, cropped versions, other matches."""
+        """Everything found as (kind, percent, heading, path): identical copies first, then the rest, most similar first."""
         sens = self.sens.get()
         out = [("exact", 100, "EXACT MATCH - identical file", p) for p in self.exact]
-        out += [("crop", core.similarity_percent(s), f"Same photo, cropped - {core.similarity_percent(s)}%", p) for s, p in self.matches if p in self.cropped]
-        out += [("other", core.similarity_percent(s), f"{core.similarity_percent(s)}% similar - {core.verdict(s, sens)}", p) for s, p in self.matches if p not in self.cropped]
-        return out
+        rest = [("crop", core.similarity_percent(s), f"Same photo, cropped - {core.similarity_percent(s)}%", p) for s, p in self.matches if p in self.cropped]
+        rest += [("other", core.similarity_percent(s), f"{core.similarity_percent(s)}% similar - {core.verdict(s, sens)}", p) for s, p in self.matches if p not in self.cropped]
+        rest.sort(key=lambda e: -e[1])
+        return out + rest
+
+    def _keep_crop_pct(self):
+        return core.similarity_percent(core.SENSITIVITY[self.sens.get()][1])
+
+    def _visible(self, cutoff):
+        """Indexes into self.entries: identical copies, anything at least `cutoff`% similar, and cropped copies that count as a match."""
+        keep = self._keep_crop_pct()
+        return [i for i, e in enumerate(self.entries) if e[0] == "exact" or e[1] >= cutoff or (e[0] == "crop" and e[1] >= keep)]
+
+    def _set_cutoff(self, pct):
+        self.cutoff = pct
+        self._setting = True
+        try:
+            self.minvar.set(str(pct))
+        finally:
+            self._setting = False
+
+    def _start_grid(self):
+        """First view: identical copies and everything down to 80% similar (at least the 3 best, so there is always something to compare)."""
+        cut = 80
+        others = [e for e in self.entries if e[0] != "exact"]
+        if len([e for e in others if e[1] >= cut]) < 3 and others:
+            cut = min(cut, others[min(2, len(others) - 1)][1])
+        self._set_cutoff(cut)
+        self.shown = self._visible(cut)
+        self._refresh_grid(reset=True)
+
+    def _refresh_grid(self, reset=False, first_new=None):
+        q_head = "THIS SCAN" + ((" (auto-cropped)" if self.query_auto else " (cropped)") if self.query_crop else "")
+        cards = [(q_head, self.query_path, self.query_crop, True)]
+        cards += [(self.entries[i][2], self.entries[i][3], None, False) for i in self.shown]
+        self._cards = [(c[0], c[1]) for c in cards]
+        self.grid_view.set_cards(cards, reset=reset)
+        if first_new is not None:
+            self.grid_view.see(first_new + 1)
+        total = len(self.entries)
+        left = total - len(self.shown)
+        capped = f" (the best {MORE_MAX} are kept)" if len(self.matches) >= MORE_MAX else ""
+        self.more_info.set(f"showing {len(self.shown)} of {total} matches{capped}")
+        self.btn_more.config(state="normal" if left > 0 else "disabled")
+        self.spin.config(state="normal" if self.entries else "disabled")
+
+    def _cutoff_changed(self):
+        if self._setting:
+            return
+        if self._cutoff_job:
+            self.after_cancel(self._cutoff_job)
+        self._cutoff_job = self.after(300, self.apply_cutoff)
+
+    def apply_cutoff(self):
+        self._cutoff_job = None
+        try:
+            pct = max(0, min(100, int(float(self.minvar.get()))))
+        except ValueError:
+            return
+        if not self.entries:
+            return
+        self.cutoff = pct
+        self.shown = self._visible(pct)
+        self._refresh_grid(reset=True)
 
     def show_more(self):
-        entries = self.more_entries()
-        if not entries:
+        """Bring in the next 12 matches below the ones already shown."""
+        if self._cutoff_job:
+            self.after_cancel(self._cutoff_job)
+            self._cutoff_job = None
+        have = set(self.shown)
+        rest = [i for i in range(len(self.entries)) if i not in have]
+        if not rest:
             return
-        maybe = core.SENSITIVITY[self.sens.get()][1]
-        if getattr(self, "more", None) is not None and self.more.winfo_exists():
-            self.more.destroy()
-        self.more = MoreWindow(self, entries, os.path.basename(self.query_path), core.similarity_percent(maybe))
+        take = rest[:12]
+        first_new = len(self.shown)
+        self.shown = self.shown + take
+        self._set_cutoff(min(self.cutoff, self.entries[take[-1]][1]))
+        self._refresh_grid(first_new=first_new)
 
     def add_current(self):
         if not self.query_path:
@@ -1025,41 +1001,53 @@ def selftest(out_path):
         assert found and found[0][1] == os.path.normpath(fpath) and found[0][0] >= 0.8, found[:2]
         msgs.append("faces ok")
         app.update()
-        app.btn_more.invoke() if str(app.btn_more.cget("state")) == "normal" else None
-        app.update()
-        assert str(app.btn_more.cget("state")) == "normal", "more-matches button not enabled after a check"
-        total = len(app.exact) + len(app.matches)
-        assert getattr(app, "more", None) is not None, "more-matches window did not open"
-        app.more.set_min(0)  # everything
-        assert len(app.more.cards) == total >= 2, (len(app.more.cards), total)
+        # the first view holds the scan, the identical copy and every match down to 80%
+        assert len(app.grid_view.cards) == 1 + len(app.shown) >= 2, (len(app.grid_view.cards), app.shown)
         t0 = time.time()
-        while time.time() - t0 < 30 and app.more.pending():
+        while time.time() - t0 < 30 and app.grid_view.pending():
             app.update()
             time.sleep(0.05)
-        assert app.more.pending() == 0, "pictures did not load in the more-matches window"
-        app.more.destroy()
-        # the similarity cutoff: identical copies always stay, others need to reach it
+        assert app.grid_view.pending() == 0, "pictures did not load in the main window"
+        # 'Show more matches' adds the next ones below, the cutoff box can show everything or less
         some = os.path.join(d, "x.png")
-        probe = MoreWindow(app, [("exact", 100, "E", some), ("other", 90, "A", some), ("crop", 72, "B", some), ("other", 40, "C", some)], "probe", 60)
-        assert len(probe.cards) == 3, probe.cards  # 100, 90, 72 at 60%
-        probe.set_min(95)
-        assert [h for h, _p in probe.cards] == ["E"], probe.cards
-        probe.set_min(0)
-        assert len(probe.cards) == 4
-        probe.set_min(100)
-        assert [h for h, _p in probe.cards] == ["E"], probe.cards
-        probe.destroy()
+        saved = (app.entries, app.shown, app.cutoff)
+        app.entries = [("exact", 100, "E", some)] + [("other", 99 - 3 * k, f"M{k}", some) for k in range(30)]  # 99 ... 12
+        app._start_grid()
+        assert [app.entries[i][2] for i in app.shown][:2] == ["E", "M0"] and len(app.shown) == 1 + 7, app.shown  # 99..81
+        assert len(app.grid_view.cards) == 9 and app.cutoff == 80
+        assert str(app.btn_more.cget("state")) == "normal"
+        app.btn_more.invoke()
+        app.update()
+        assert len(app.grid_view.cards) == 9 + 12 and app.minvar.get() == "45", (len(app.grid_view.cards), app.minvar.get())
+        assert [c[0] for c in app.grid_view.cards][9] == "M7"  # new ones come after the old ones
+        app.btn_more.invoke()
+        app.btn_more.invoke()
+        app.update()
+        assert len(app.grid_view.cards) == 32 and str(app.btn_more.cget("state")) == "disabled", len(app.grid_view.cards)
+        app.minvar.set("90")
+        app.apply_cutoff()
+        assert [c[0] for c in app.grid_view.cards][1:] == ["E", "M0", "M1", "M2", "M3"], [c[0] for c in app.grid_view.cards]
+        app.minvar.set("0")
+        app.apply_cutoff()
+        assert len(app.grid_view.cards) == 32
+        app.minvar.set("100")
+        app.apply_cutoff()
+        assert [c[0] for c in app.grid_view.cards][1:] == ["E"]
+        app.entries, app.shown, app.cutoff = saved
         # hundreds of matches must not freeze the window: only the cards on screen are built
-        many = [("exact", 100, "E", some)] + [("other", 99 - (k % 60), f"M{k}", some) for k in range(499)]
+        big_win = tk.Toplevel(app)
+        big_win.geometry("1000x600")
+        big = CardGrid(big_win)
+        big.pack(fill="both", expand=True)
         t0 = time.time()
-        big = MoreWindow(app, many, "stress", 0)
+        big.set_cards([(f"M{k}", some, None, False) for k in range(500)])
         big.update()
         assert len(big.cards) == 500 and 0 < len(big._live) < 80, (len(big.cards), len(big._live))
         assert time.time() - t0 < 10, "opening 500 matches was too slow"
         big.canvas.yview_moveto(0.9)
         big.update()
         assert 0 < len(big._live) < 80 and max(big._live) > 300, (len(big._live), max(big._live, default=None))
-        big.destroy()
+        big_win.destroy()
         msgs.append("more matches ok")
         # the cropped-copy check must really run inside the packaged app (its errors are otherwise silent)
         sm = Image.fromarray((rng.random((9, 12)) * 255).astype("uint8")).resize((640, 480), Image.BICUBIC)
@@ -1075,14 +1063,13 @@ def selftest(out_path):
 
         def fits():
             app.update()
-            app._layout_cards()
-            app.update()
-            rw, rh = app.results.winfo_width(), app.results.winfo_height()
-            cards = app.results.winfo_children()
-            assert len(cards) >= 5, f"only {len(cards)} cards shown"
-            for c in cards:
-                assert c.winfo_x() >= 0 and c.winfo_x() + c.winfo_width() <= rw + 2, ("card sticks out sideways", rw, c.winfo_x(), c.winfo_width())
-                assert c.winfo_y() >= 0 and c.winfo_y() + c.winfo_height() <= rh + 2, ("card sticks out below", rh, c.winfo_y(), c.winfo_height())
+            g = app.grid_view
+            cw, ch = g.canvas.winfo_width(), g.canvas.winfo_height()
+            assert ch >= 100 and g._live, ("results area too small or empty", cw, ch, len(g._live))
+            for c, _pic in g._live.values():
+                if c.winfo_y() < ch:  # the first row
+                    assert c.winfo_x() >= 0 and c.winfo_x() + c.winfo_width() <= cw + 2, ("card sticks out sideways", cw, c.winfo_x(), c.winfo_width())
+            assert app.btn_more.winfo_ismapped() and app.more_bar.winfo_y() + app.more_bar.winfo_height() <= app.winfo_height() + 2, "bottom bar cut off"
 
         # a scan with a big blank strip under the photo is cropped automatically
         strip = os.path.join(d, "strip scan.png")

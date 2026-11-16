@@ -44,6 +44,7 @@ def reveal(path):
 
 
 THUMB_MAX, THUMB_MIN = 300, 90
+MORE_MAX = 30              # most matches listed in the 'More matches' window
 CARD_X, CARD_Y = 34, 178   # per-card horizontal / vertical overhead (borders, text, buttons)
 
 
@@ -90,6 +91,73 @@ def load_pil_thumb(path, side=THUMB_MAX):
 def thumbnail(path, size=THUMB):
     img = load_pil_thumb(path, size)
     return ImageTk.PhotoImage(img)
+
+
+class MoreWindow(tk.Toplevel):
+    """Every match found, as a scrolling grid: identical copies first, then differently cropped
+    versions, then the other close matches."""
+
+    THUMB, COLS = 190, 4
+
+    def __init__(self, parent, cards, summary):
+        super().__init__(parent)
+        self.title("More matches")
+        self.geometry("1020x720")
+        self.cards = cards
+        self._images = []
+        ttk.Label(self, text=summary, font=("Segoe UI", 11, "bold"), wraplength=960, justify="left").pack(fill="x", padx=12, pady=(10, 4))
+        body = ttk.Frame(self)
+        body.pack(fill="both", expand=True, padx=8, pady=6)
+        self.canvas = tk.Canvas(body, highlightthickness=0)
+        bar = ttk.Scrollbar(body, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.inner = ttk.Frame(self.canvas)
+        self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.inner.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.bind("<MouseWheel>", self._wheel)
+        self.bind("<Button-4>", lambda e: self.canvas.yview_scroll(-3, "units"))
+        self.bind("<Button-5>", lambda e: self.canvas.yview_scroll(3, "units"))
+        self.bind("<Escape>", lambda e: self.destroy())
+        ttk.Button(self, text="Close", command=self.destroy).pack(pady=(0, 8))
+        self._slots = []
+        for i, (heading, path) in enumerate(cards):
+            self._slots.append(self._card(i // self.COLS, i % self.COLS, heading, path))
+        self.after(20, lambda: self._fill(0))  # thumbnails load a few at a time so the window opens at once
+
+    def _wheel(self, e):
+        step = -1 * (e.delta // 120) if abs(e.delta) >= 120 else (-1 if e.delta > 0 else 1)
+        self.canvas.yview_scroll(step * 3, "units")
+
+    def _card(self, row, col, heading, path):
+        t = self.THUMB
+        f = ttk.Frame(self.inner, padding=6, relief="groove")
+        f.grid(row=row, column=col, sticky="n", padx=4, pady=4)
+        ttk.Label(f, text=heading, font=("Segoe UI", 10, "bold"), wraplength=t, justify="center").pack()
+        pic = ttk.Label(f, text="...", width=max(10, t // 8))
+        pic.pack(pady=4)
+        ttk.Label(f, text=shorten(os.path.basename(path), 36), wraplength=t, justify="center").pack()
+        ttk.Label(f, text=shorten(os.path.dirname(path), 44), wraplength=t, foreground="#666", justify="center").pack()
+        row_f = ttk.Frame(f)
+        row_f.pack(pady=4)
+        ttk.Button(row_f, text="Open", width=6, command=lambda: open_path(path)).pack(side="left", padx=2)
+        ttk.Button(row_f, text="Show in folder", command=lambda: reveal(path)).pack(side="left", padx=2)
+        return pic, path
+
+    def _fill(self, start):
+        if not self.winfo_exists():
+            return
+        for pic, path in self._slots[start : start + 3]:
+            try:
+                img = load_pil_thumb(path, self.THUMB)
+                photo = ImageTk.PhotoImage(img)
+                self._images.append(photo)
+                pic.config(image=photo, text="", width=0)
+            except Exception:  # noqa: BLE001
+                pic.config(text="(cannot preview)")
+        if start + 3 < len(self._slots):
+            self.after(10, lambda: self._fill(start + 3))
 
 
 class CropDialog(tk.Toplevel):
@@ -369,6 +437,8 @@ class App(_Base):
         self.sens.bind("<<ComboboxSelected>>", lambda e: self.matches and self.show_results())
         self.btn_crop = ttk.Button(mid, text="Crop...", command=self.crop, state="disabled")
         self.btn_crop.pack(side="left", padx=(24, 0))
+        self.btn_more = ttk.Button(mid, text="Show more matches...", command=self.show_more, state="disabled")
+        self.btn_more.pack(side="left", padx=(8, 0))
         self.btn_addfile = ttk.Button(mid, text="Add this photo to the collection", command=self.add_current, state="disabled")
         self.btn_addfile.pack(side="right", padx=8)
 
@@ -535,6 +605,7 @@ class App(_Base):
         token = self._search_token
         self.btn_check.config(state="disabled")
         self.btn_crop.config(state="disabled")
+        self.btn_more.config(state="disabled")
         self.btn_addfile.config(state="disabled")
         self.verdict_label.config(fg="black")
         self.verdict.set(f"Checking {os.path.basename(path)} against {self.index.count():,} photos...")
@@ -546,8 +617,8 @@ class App(_Base):
                     use = core.auto_crop(path)
                     was_auto = use is not None
                 exact = self.index.find_exact(path)
-                m, already = self.index.search(path, top=14 + len(exact), crop=use, also_whole=was_auto)
-                m = [x for x in m if x[1] not in exact][:14]
+                m, already = self.index.search(path, top=MORE_MAX + len(exact), crop=use, also_whole=was_auto)
+                m = [x for x in m if x[1] not in exact][:MORE_MAX]
                 self.q.put(("search_done", token, m, already, use, was_auto, exact, set(self.index.last_cropped)))
             except Exception as e:  # noqa: BLE001
                 self.q.put(("search_error", token, str(e)))
@@ -614,6 +685,7 @@ class App(_Base):
         self.verdict.set(text)
         self.verdict_label.config(fg=COLORS.get(v, COLORS["likely duplicate"]))
         self.btn_addfile.config(state="normal" if not self.already else "disabled")
+        self.btn_more.config(state="normal")
         exact_cards = self.exact[:2]
         slots = max(1, 4 - len(exact_cards))
         crop_paths = {p for _s, p in crops}
@@ -694,6 +766,28 @@ class App(_Base):
         ttk.Button(row_f, text="Show in folder", command=lambda: reveal(path)).pack(side=side, padx=2, pady=1)
         if DND_FILES:
             self._register_drop(f)
+
+    def more_cards(self):
+        """(heading, path) for everything found: identical copies, cropped versions, then other matches."""
+        sens = self.sens.get()
+        cards = [("EXACT MATCH - identical file", p) for p in self.exact]
+        cards += [(f"Same photo, cropped - {core.similarity_percent(s)}%", p) for s, p in self.matches if p in self.cropped]
+        cards += [(f"{core.similarity_percent(s)}% similar - {core.verdict(s, sens)}", p) for s, p in self.matches if p not in self.cropped]
+        return cards
+
+    def show_more(self):
+        cards = self.more_cards()
+        if not cards:
+            return
+        n_ex = len(self.exact)
+        n_cr = sum(1 for _s, p in self.matches if p in self.cropped)
+        parts = []
+        if n_ex:
+            parts.append(f"{n_ex} identical cop{'y' if n_ex == 1 else 'ies'}")
+        if n_cr:
+            parts.append(f"{n_cr} differently cropped")
+        parts.append(f"{len(cards) - n_ex - n_cr} other close matches")
+        self.more = MoreWindow(self, cards, f"{os.path.basename(self.query_path)}: " + ", ".join(parts) + f" (best {MORE_MAX} matches shown).")
 
     def add_current(self):
         if not self.query_path:
@@ -778,6 +872,19 @@ def selftest(out_path):
         assert idx.crop_error is None, idx.crop_error
         assert found and found[0][1] == os.path.normpath(fpath) and found[0][0] >= 0.8, found[:2]
         msgs.append("faces ok")
+        app.update()
+        app.btn_more.invoke() if str(app.btn_more.cget("state")) == "normal" else None
+        app.update()
+        assert str(app.btn_more.cget("state")) == "normal", "more-matches button not enabled after a check"
+        n_expected = len(app.exact) + len(app.matches)
+        assert getattr(app, "more", None) and len(app.more.cards) == n_expected >= 2, (n_expected, getattr(app, "more", None))
+        t0 = time.time()
+        while time.time() - t0 < 20 and len(app.more._images) < len(app.more.cards):
+            app.update()
+            time.sleep(0.05)
+        assert len(app.more._images) == len(app.more.cards), "thumbnails did not load in the more-matches window"
+        app.more.destroy()
+        msgs.append("more matches ok")
         # the cropped-copy check must really run inside the packaged app (its errors are otherwise silent)
         sm = Image.fromarray((rng.random((9, 12)) * 255).astype("uint8")).resize((640, 480), Image.BICUBIC)
         sm_path, sm_crop = os.path.join(d, "smooth.png"), os.path.join(d, "smooth crop.png")

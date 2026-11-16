@@ -107,9 +107,11 @@ class MoreWindow(tk.Toplevel):
         """entries: [(kind, percent, heading, path)] with kind 'exact' | 'crop' | 'other'."""
         super().__init__(parent)
         self.title("More matches")
-        self.geometry("1100x700")
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        self.geometry(f"{min(1100, sw - 60)}x{min(700, sh - 150)}")
         self.entries, self.name = entries, name
-        self.cards, self.cols = [], 0
+        self.cards, self.cols, self.x0 = [], 0, 0
+        self._items = {}
         self._live, self._photos, self._thumbs, self._pending = {}, {}, {}, set()
         self._done = queue.Queue()
         self._pool = ThreadPoolExecutor(max_workers=3)
@@ -199,17 +201,25 @@ class MoreWindow(tk.Toplevel):
     def _clear_cards(self):
         for f, _pic in self._live.values():
             f.destroy()
-        self._live, self._photos = {}, {}
+        self.canvas.delete("all")
+        self._live, self._photos, self._items = {}, {}, {}
 
     def _layout(self):
         if not self.winfo_exists():
             return
-        cols = max(1, self.canvas.winfo_width() // self.CELL_W)
+        width = self.canvas.winfo_width()
+        cols = max(1, width // self.CELL_W)
         if cols != self.cols:
             self.cols = cols
             self._clear_cards()
+        x0 = max(0, (width - cols * self.CELL_W) // 2)  # leftover width is split evenly on both sides
+        if x0 != self.x0:
+            self.x0 = x0
+            for i, item in self._items.items():
+                r, c = divmod(i, self.cols)
+                self.canvas.coords(item, self.x0 + c * self.CELL_W + 4, r * self.CELL_H + 4)
         rows = -(-len(self.cards) // cols)
-        self.canvas.configure(scrollregion=(0, 0, cols * self.CELL_W, max(rows * self.CELL_H, 1)))
+        self.canvas.configure(scrollregion=(0, 0, max(width, cols * self.CELL_W), max(rows * self.CELL_H, 1)))
         self._update_visible()
 
     def _on_scroll(self, lo, hi):
@@ -227,6 +237,7 @@ class MoreWindow(tk.Toplevel):
         for i in [i for i in self._live if i not in want]:
             self._live.pop(i)[0].destroy()
             self._photos.pop(i, None)
+            self.canvas.delete(self._items.pop(i, None))
         for i in sorted(want):
             if i not in self._live:
                 self._make_card(i)
@@ -246,7 +257,7 @@ class MoreWindow(tk.Toplevel):
         ttk.Button(row, text="Open", width=6, command=lambda: open_path(path)).pack(side="left", padx=2)
         ttk.Button(row, text="Show in folder", command=lambda: reveal(path)).pack(side="left", padx=2)
         r, c = divmod(i, self.cols)
-        self.canvas.create_window(c * self.CELL_W + 4, r * self.CELL_H + 4, window=f, anchor="nw", width=self.CELL_W - 8, height=self.CELL_H - 8)
+        self._items[i] = self.canvas.create_window(self.x0 + c * self.CELL_W + 4, r * self.CELL_H + 4, window=f, anchor="nw", width=self.CELL_W - 8, height=self.CELL_H - 8)
         self._live[i] = (f, pic)
         if path in self._thumbs:
             self._show(i)

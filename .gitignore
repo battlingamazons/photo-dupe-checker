@@ -11,3 +11,5 @@ selftest.txt
 *.png
 *.tif
 *.tiff
+# The one public-domain test photo (1927 Solvay Conference, Wikimedia Commons) used by the face tests
+!tests/data/solvay_1927.jpg

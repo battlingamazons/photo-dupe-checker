@@ -43,9 +43,9 @@ def reveal(path):
         subprocess.run(["open", "-R", path], check=False)
 
 
-THUMB_MAX, THUMB_MIN = 300, 90
+THUMB_MAX, THUMB_MIN = 300, 60
 MORE_MAX = 500             # most matches kept for the 'More matches' window
-CARD_X, CARD_Y = 34, 178   # per-card horizontal / vertical overhead (borders, text, buttons)
+CARD_X, CARD_Y = 34, 190   # per-card horizontal / vertical overhead (borders, text, buttons)
 
 
 def app_version():
@@ -103,7 +103,7 @@ class MoreWindow(tk.Toplevel):
         """entries: [(kind, percent, heading, path)] with kind 'exact' | 'crop' | 'other'."""
         super().__init__(parent)
         self.title("More matches")
-        self.geometry("1020x740")
+        self.geometry("1020x660")
         self.entries, self.name = entries, name
         self.cards, self._images, self._slots, self._gen, self._job = [], [], [], 0, None
         self.summary = tk.StringVar()
@@ -116,6 +116,9 @@ class MoreWindow(tk.Toplevel):
         self.spin.pack(side="left", padx=4)
         ttk.Label(bar_row, text=f"% similar   (identical copies are always shown; 0 shows everything, up to the best {MORE_MAX})", foreground="#555").pack(side="left")
         self.minvar.trace_add("write", lambda *a: self._changed())
+        self.spin.bind("<FocusIn>", lambda e: self.after_idle(lambda: self.spin.selection_range(0, "end")))
+        self.spin.bind("<Control-a>", lambda e: (self.spin.selection_range(0, "end"), "break")[1])
+        self.bind("<Return>", lambda e: self.rebuild())
         body = ttk.Frame(self)
         body.pack(fill="both", expand=True, padx=8, pady=6)
         self.canvas = tk.Canvas(body, highlightthickness=0)
@@ -132,6 +135,15 @@ class MoreWindow(tk.Toplevel):
         self.bind("<Escape>", lambda e: self.destroy())
         ttk.Button(self, text="Close", command=self.destroy).pack(pady=(0, 8))
         self.rebuild()
+        self.after(60, self._take_focus)
+
+    def _take_focus(self):
+        try:
+            self.lift()
+            self.focus_force()
+            self.spin.focus_set()
+        except tk.TclError:
+            pass
 
     def minimum(self):
         try:
@@ -489,14 +501,18 @@ class App(_Base):
         self.sens.bind("<<ComboboxSelected>>", lambda e: self.matches and self.show_results())
         self.btn_crop = ttk.Button(mid, text="Crop...", command=self.crop, state="disabled")
         self.btn_crop.pack(side="left", padx=(24, 0))
-        self.btn_more = ttk.Button(mid, text="Show more matches...", command=self.show_more, state="disabled")
-        self.btn_more.pack(side="left", padx=(8, 0))
         self.btn_addfile = ttk.Button(mid, text="Add this photo to the collection", command=self.add_current, state="disabled")
         self.btn_addfile.pack(side="right", padx=8)
 
         self.verdict = tk.StringVar(value="Add your folders above, then drag a scan onto this window to check it.")
         self.verdict_label = tk.Label(self, textvariable=self.verdict, font=("Segoe UI", 14, "bold"), anchor="w", justify="left", wraplength=1000)
         self.verdict_label.pack(fill="x", padx=12, pady=(6, 0))
+
+        more_bar = ttk.Frame(self)
+        more_bar.pack(side="bottom", fill="x", padx=10, pady=(0, 6))
+        ttk.Label(more_bar, text="Only the best few matches fit above. The button lists all of them, down to a similarity you choose.", foreground="#555").pack(side="left")
+        self.btn_more = ttk.Button(more_bar, text="Show more matches...", command=self.show_more, state="disabled")
+        self.btn_more.pack(side="right")
 
         self.results = ttk.Frame(self)
         self.results.pack(fill="both", expand=True, padx=10, pady=6)
@@ -797,7 +813,7 @@ class App(_Base):
     def _card(self, row, col, heading, path, t, is_query=False):
         f = ttk.Frame(self.results, padding=6, relief="groove")
         f.grid(row=row, column=col, sticky="n", padx=4, pady=4)
-        ttk.Label(f, text=heading, font=("Segoe UI", 10, "bold"), wraplength=t, justify="center").pack()
+        ttk.Label(f, text=heading, font=("Segoe UI", 10, "bold"), wraplength=max(t, 160), justify="center").pack()
         try:
             img = self._pil(path).copy()
             if is_query:
@@ -808,9 +824,9 @@ class App(_Base):
             ttk.Label(f, image=photo).pack(pady=4)
         except Exception:  # noqa: BLE001
             ttk.Label(f, text="(cannot preview)", width=max(10, t // 8)).pack(pady=30)
-        ttk.Label(f, text=shorten(os.path.basename(path), 40), wraplength=t, justify="center").pack()
+        ttk.Label(f, text=shorten(os.path.basename(path), 40), wraplength=max(t, 160), justify="center").pack()
         if not is_query:
-            ttk.Label(f, text=shorten(os.path.dirname(path), 52), wraplength=t, foreground="#666", justify="center").pack()
+            ttk.Label(f, text=shorten(os.path.dirname(path), 52), wraplength=max(t, 160), foreground="#666", justify="center").pack()
         row_f = ttk.Frame(f)
         row_f.pack(pady=4)
         side = "left" if t >= 150 else "top"

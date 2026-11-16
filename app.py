@@ -2,6 +2,7 @@
 import math
 import os
 import queue
+from concurrent.futures import ThreadPoolExecutor
 import subprocess
 import sys
 import threading
@@ -94,20 +95,27 @@ def thumbnail(path, size=THUMB):
 
 
 class MoreWindow(tk.Toplevel):
-    """Every match found, as a scrolling grid: identical copies first, then differently cropped
-    versions, then the other close matches - all those at least as similar as the chosen cutoff."""
+    """Every match found, as a scrolling grid that fills the window: identical copies first, then
+    differently cropped versions, then the other close matches - all those at least as similar as
+    the chosen cutoff. Only the cards on screen are built and their pictures load in the
+    background, so hundreds of matches stay responsive."""
 
-    THUMB, COLS = 190, 4
+    THUMB = 190
+    CELL_W, CELL_H = THUMB + 40, THUMB + 150
 
     def __init__(self, parent, entries, name, default_min):
         """entries: [(kind, percent, heading, path)] with kind 'exact' | 'crop' | 'other'."""
         super().__init__(parent)
         self.title("More matches")
-        self.geometry("1020x660")
+        self.geometry("1100x700")
         self.entries, self.name = entries, name
-        self.cards, self._images, self._slots, self._gen, self._job = [], [], [], 0, None
+        self.cards, self.cols = [], 0
+        self._live, self._photos, self._thumbs, self._pending = {}, {}, {}, set()
+        self._done = queue.Queue()
+        self._pool = ThreadPoolExecutor(max_workers=3)
+        self._job = None
         self.summary = tk.StringVar()
-        ttk.Label(self, textvariable=self.summary, font=("Segoe UI", 11, "bold"), wraplength=960, justify="left").pack(fill="x", padx=12, pady=(10, 2))
+        ttk.Label(self, textvariable=self.summary, font=("Segoe UI", 11, "bold"), wraplength=1000, justify="left").pack(fill="x", padx=12, pady=(10, 2))
         bar_row = ttk.Frame(self)
         bar_row.pack(fill="x", padx=12, pady=(0, 4))
         ttk.Label(bar_row, text="Show matches that are at least").pack(side="left")
@@ -121,22 +129,25 @@ class MoreWindow(tk.Toplevel):
         self.bind("<Return>", lambda e: self.rebuild())
         body = ttk.Frame(self)
         body.pack(fill="both", expand=True, padx=8, pady=6)
-        self.canvas = tk.Canvas(body, highlightthickness=0)
-        bar = ttk.Scrollbar(body, orient="vertical", command=self.canvas.yview)
-        self.canvas.configure(yscrollcommand=bar.set)
-        bar.pack(side="right", fill="y")
+        self.canvas = tk.Canvas(body, highlightthickness=0, yscrollincrement=60)
+        self.bar = ttk.Scrollbar(body, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self._on_scroll)
+        self.bar.pack(side="right", fill="y")
         self.canvas.pack(side="left", fill="both", expand=True)
-        self.inner = ttk.Frame(self.canvas)
-        self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
-        self.inner.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.canvas.bind("<Configure>", lambda e: self._layout())
         self.bind("<MouseWheel>", self._wheel)
         self.bind("<Button-4>", lambda e: self.canvas.yview_scroll(-3, "units"))
         self.bind("<Button-5>", lambda e: self.canvas.yview_scroll(3, "units"))
+        self.bind("<Prior>", lambda e: self.canvas.yview_scroll(-8, "units"))
+        self.bind("<Next>", lambda e: self.canvas.yview_scroll(8, "units"))
         self.bind("<Escape>", lambda e: self.destroy())
+        self.bind("<Destroy>", self._on_destroy)
         ttk.Button(self, text="Close", command=self.destroy).pack(pady=(0, 8))
         self.rebuild()
         self.after(60, self._take_focus)
+        self.after(40, self._poll)
 
+    # ---- the cutoff ----
     def _take_focus(self):
         try:
             self.lift()
@@ -168,10 +179,6 @@ class MoreWindow(tk.Toplevel):
         lo = self.minimum()
         if lo is None:
             return
-        self._gen += 1
-        for w in self.inner.winfo_children():
-            w.destroy()
-        self._images, self._slots = [], []
         shown = [x for x in self.entries if x[0] == "exact" or x[1] >= lo]
         self.cards = [(h, p) for _k, _pc, h, p in shown]
         n_ex = sum(1 for x in shown if x[0] == "exact")
@@ -184,44 +191,115 @@ class MoreWindow(tk.Toplevel):
         parts.append(f"{len(shown) - n_ex - n_cr} other matches")
         hidden = len(self.entries) - len(shown)
         self.summary.set(f"{self.name}: " + ", ".join(parts) + (f"  ({hidden} below {lo}% hidden)" if hidden else ""))
-        for i, (heading, path) in enumerate(self.cards):
-            self._slots.append(self._card(i // self.COLS, i % self.COLS, heading, path))
+        self._clear_cards()
         self.canvas.yview_moveto(0)
-        gen = self._gen
-        self.after(20, lambda: self._fill(0, gen))  # thumbnails load a few at a time so the window opens at once
+        self._layout()
+
+    # ---- the grid: only what is on screen exists ----
+    def _clear_cards(self):
+        for f, _pic in self._live.values():
+            f.destroy()
+        self._live, self._photos = {}, {}
+
+    def _layout(self):
+        if not self.winfo_exists():
+            return
+        cols = max(1, self.canvas.winfo_width() // self.CELL_W)
+        if cols != self.cols:
+            self.cols = cols
+            self._clear_cards()
+        rows = -(-len(self.cards) // cols)
+        self.canvas.configure(scrollregion=(0, 0, cols * self.CELL_W, max(rows * self.CELL_H, 1)))
+        self._update_visible()
+
+    def _on_scroll(self, lo, hi):
+        self.bar.set(lo, hi)
+        self._update_visible()
+
+    def _update_visible(self):
+        if not self.cols:
+            return
+        top = self.canvas.canvasy(0)
+        height = max(self.canvas.winfo_height(), 1)
+        r0 = max(0, int(top // self.CELL_H) - 1)
+        r1 = int((top + height) // self.CELL_H) + 1
+        want = set(range(r0 * self.cols, min(len(self.cards), (r1 + 1) * self.cols)))
+        for i in [i for i in self._live if i not in want]:
+            self._live.pop(i)[0].destroy()
+            self._photos.pop(i, None)
+        for i in sorted(want):
+            if i not in self._live:
+                self._make_card(i)
+
+    def _make_card(self, i):
+        heading, path = self.cards[i]
+        t = self.THUMB
+        f = tk.Frame(self.canvas, relief="groove", borderwidth=2)
+        f.pack_propagate(False)
+        ttk.Label(f, text=heading, font=("Segoe UI", 10, "bold"), wraplength=t, justify="center").pack(pady=(4, 0))
+        pic = ttk.Label(f, text="...", anchor="center")
+        pic.pack(pady=4)
+        ttk.Label(f, text=shorten(os.path.basename(path), 34), wraplength=t, justify="center").pack()
+        ttk.Label(f, text=shorten(os.path.dirname(path), 42), wraplength=t, foreground="#666", justify="center").pack()
+        row = ttk.Frame(f)
+        row.pack(pady=4)
+        ttk.Button(row, text="Open", width=6, command=lambda: open_path(path)).pack(side="left", padx=2)
+        ttk.Button(row, text="Show in folder", command=lambda: reveal(path)).pack(side="left", padx=2)
+        r, c = divmod(i, self.cols)
+        self.canvas.create_window(c * self.CELL_W + 4, r * self.CELL_H + 4, window=f, anchor="nw", width=self.CELL_W - 8, height=self.CELL_H - 8)
+        self._live[i] = (f, pic)
+        if path in self._thumbs:
+            self._show(i)
+        elif path not in self._pending:
+            self._pending.add(path)
+            self._pool.submit(self._load, path)
+
+    # ---- pictures load in the background ----
+    def _load(self, path):
+        try:
+            img = load_pil_thumb(path, self.THUMB)
+        except Exception:  # noqa: BLE001
+            img = None
+        self._done.put((path, img))
+
+    def _poll(self):
+        if not self.winfo_exists():
+            return
+        for _ in range(6):
+            try:
+                path, img = self._done.get_nowait()
+            except queue.Empty:
+                break
+            self._pending.discard(path)
+            if len(self._thumbs) > 300:
+                self._thumbs.pop(next(iter(self._thumbs)))
+            self._thumbs[path] = img
+            for i in [i for i in self._live if self.cards[i][1] == path]:
+                self._show(i)
+        self.after(30, self._poll)
+
+    def _show(self, i):
+        _f, pic = self._live[i]
+        img = self._thumbs.get(self.cards[i][1])
+        if img is None:
+            pic.config(text="(cannot preview)")
+            self._photos[i] = None
+            return
+        photo = ImageTk.PhotoImage(img)
+        self._photos[i] = photo
+        pic.config(image=photo, text="")
+
+    def pending(self):
+        """How many cards on screen are still waiting for their picture."""
+        return sum(1 for i in self._live if i not in self._photos)
+
+    def _on_destroy(self, e):
+        if e.widget is self:
+            self._pool.shutdown(wait=False, cancel_futures=True)
 
     def _wheel(self, e):
         step = -1 * (e.delta // 120) if abs(e.delta) >= 120 else (-1 if e.delta > 0 else 1)
         self.canvas.yview_scroll(step * 3, "units")
-
-    def _card(self, row, col, heading, path):
-        t = self.THUMB
-        f = ttk.Frame(self.inner, padding=6, relief="groove")
-        f.grid(row=row, column=col, sticky="n", padx=4, pady=4)
-        ttk.Label(f, text=heading, font=("Segoe UI", 10, "bold"), wraplength=t, justify="center").pack()
-        pic = ttk.Label(f, text="...", width=max(10, t // 8))
-        pic.pack(pady=4)
-        ttk.Label(f, text=shorten(os.path.basename(path), 36), wraplength=t, justify="center").pack()
-        ttk.Label(f, text=shorten(os.path.dirname(path), 44), wraplength=t, foreground="#666", justify="center").pack()
-        row_f = ttk.Frame(f)
-        row_f.pack(pady=4)
-        ttk.Button(row_f, text="Open", width=6, command=lambda: open_path(path)).pack(side="left", padx=2)
-        ttk.Button(row_f, text="Show in folder", command=lambda: reveal(path)).pack(side="left", padx=2)
-        return pic, path
-
-    def _fill(self, start, gen):
-        if not self.winfo_exists() or gen != self._gen:
-            return
-        for pic, path in self._slots[start : start + 3]:
-            try:
-                photo = ImageTk.PhotoImage(load_pil_thumb(path, self.THUMB))
-                self._images.append(photo)
-                pic.config(image=photo, text="", width=0)
-            except Exception:  # noqa: BLE001
-                self._images.append(None)
-                pic.config(text="(cannot preview)")
-        if start + 3 < len(self._slots):
-            self.after(10, lambda: self._fill(start + 3, gen))
 
 
 class CropDialog(tk.Toplevel):
@@ -944,10 +1022,10 @@ def selftest(out_path):
         app.more.set_min(0)  # everything
         assert len(app.more.cards) == total >= 2, (len(app.more.cards), total)
         t0 = time.time()
-        while time.time() - t0 < 20 and len(app.more._images) < len(app.more.cards):
+        while time.time() - t0 < 30 and app.more.pending():
             app.update()
             time.sleep(0.05)
-        assert len(app.more._images) == len(app.more.cards), "thumbnails did not load in the more-matches window"
+        assert app.more.pending() == 0, "pictures did not load in the more-matches window"
         app.more.destroy()
         # the similarity cutoff: identical copies always stay, others need to reach it
         some = os.path.join(d, "x.png")
@@ -960,6 +1038,17 @@ def selftest(out_path):
         probe.set_min(100)
         assert [h for h, _p in probe.cards] == ["E"], probe.cards
         probe.destroy()
+        # hundreds of matches must not freeze the window: only the cards on screen are built
+        many = [("exact", 100, "E", some)] + [("other", 99 - (k % 60), f"M{k}", some) for k in range(499)]
+        t0 = time.time()
+        big = MoreWindow(app, many, "stress", 0)
+        big.update()
+        assert len(big.cards) == 500 and 0 < len(big._live) < 80, (len(big.cards), len(big._live))
+        assert time.time() - t0 < 10, "opening 500 matches was too slow"
+        big.canvas.yview_moveto(0.9)
+        big.update()
+        assert 0 < len(big._live) < 80 and max(big._live) > 300, (len(big._live), max(big._live, default=None))
+        big.destroy()
         msgs.append("more matches ok")
         # the cropped-copy check must really run inside the packaged app (its errors are otherwise silent)
         sm = Image.fromarray((rng.random((9, 12)) * 255).astype("uint8")).resize((640, 480), Image.BICUBIC)

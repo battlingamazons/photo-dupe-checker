@@ -47,6 +47,7 @@ the LGPL-2.1 (license text in `licenses\rawpy\LICENSE.LibRaw`; source: https://g
 | opencv-python-headless | Apache-2.0 (its wheels also bundle FFmpeg, LGPL-2.1, and other libraries; see `licenses\\opencv_python_headless`) | https://github.com/opencv/opencv-python |
 | YuNet face detector model (`models\\yunet.onnx`) | MIT | https://github.com/ShiqiYu/libfacedetection |
 | SFace face recognition model (`models\\sface.onnx`) | Apache-2.0 | https://github.com/opencv/opencv_zoo |
+| XlsxWriter | BSD-2-Clause (writes the audit spreadsheet) | https://github.com/jmcnamara/XlsxWriter |
 | tkinterdnd2 | MIT, bundling tkdnd | https://github.com/Eliav2/tkinterdnd2 |
 
 ## Runtime and build tools

@@ -1059,6 +1059,33 @@ def selftest(out_path):
         assert idx.crop_error is None, idx.crop_error
         assert found and found[0][1] == os.path.normpath(sm_path) and found[0][0] >= 0.8, found[:2]
         msgs.append("crop pass ok")
+        # the collection audit must run inside the packaged app too (spreadsheet writer, catalogue reader)
+        import struct
+
+        import audit
+
+        proj = os.path.join(d, "audit_project")
+        for sub in ("master", os.path.join("pp5", "Data"), os.path.join("pp5", "Images", "001")):
+            os.makedirs(os.path.join(proj, sub))
+        pa = Image.fromarray((rng.random((9, 12, 3)) * 255).astype("uint8")).resize((480, 360), Image.BICUBIC)
+        pb = Image.fromarray((rng.random((9, 12, 3)) * 255).astype("uint8")).resize((480, 360), Image.BICUBIC)
+        pa.save(os.path.join(proj, "master", "a.tif"))
+        pb.save(os.path.join(proj, "master", "b.tif"))
+        pa.resize((240, 180)).save(os.path.join(proj, "pp5", "Images", "001", "a.jpg"), quality=85)
+        fields = [("OBJECTID", 20), ("IMAGEFILE", 40)]
+        rec = b" " + b"2001.1".ljust(20) + b"001\\a.jpg".ljust(40)
+        dbf = bytearray(struct.pack("<BBBBIHH20x", 3, 126, 1, 1, 1, 32 + 32 * 2 + 1, len(rec)))
+        for fname, n in fields:
+            dbf += fname.encode().ljust(11, b"\0") + b"C" + b"\0" * 4 + bytes([n]) + b"\0" * 15
+        dbf += b"\r" + rec + b"\x1a"
+        with open(os.path.join(proj, "pp5", "Data", "PHOTOS.DBF"), "wb") as f:
+            f.write(dbf)
+        arows, astats, _w = audit.run(os.path.join(proj, "master"), os.path.join(d, "audit.xlsx"), pp_root=proj,
+                                      workdir=os.path.join(d, "audit_work"), log=lambda *a: None)
+        assert astats["photos matched between master and database"] == 1, astats
+        assert [r.sheet for r in arows] == ["Master not in database"], [(r.sheet, r.issue) for r in arows]
+        assert "Master not in DB" in audit.read_xlsx(os.path.join(d, "audit.xlsx"))
+        msgs.append("audit ok")
         msgs.append("drop ok")
 
         def fits():
@@ -1131,7 +1158,46 @@ def selftest(out_path):
         f.write(result)
 
 
+def audit_cli(argv):
+    """Command-line collection audit: master folder vs categories vs the PastPerfect catalogue -> spreadsheet."""
+    import argparse
+
+    import audit
+
+    ap = argparse.ArgumentParser(prog="--audit", description="Audit the master photo folder, the category folders and the PastPerfect catalogue. Read-only; writes a spreadsheet.")
+    ap.add_argument("--master", required=True, help="the folder that should hold every photo")
+    ap.add_argument("--categories", help="the folder that files photos into category subfolders")
+    ap.add_argument("--pp", help="the PastPerfect project folder (the Data, Images and Multimedia folders are found inside it)")
+    ap.add_argument("--pp-data", help="the PastPerfect Data folder (the .DBF files), if it is not found automatically")
+    ap.add_argument("--pp-images", help="the PastPerfect Images folder, if it is not found automatically")
+    ap.add_argument("--pp-multimedia", help="the PastPerfect Multimedia folder, if it is not found automatically")
+    ap.add_argument("--out", default="collection-audit.xlsx", help="where to write the spreadsheet (default: collection-audit.xlsx here)")
+    ap.add_argument("--previous", help="an earlier report: Status and Notes of problems that are still there are carried over")
+    ap.add_argument("--workdir", help="where the audit keeps its own index (default: next to the report); keep it to make later runs fast")
+    ap.add_argument("--reuse-index", nargs="?", const="default", help="start from the checker's own index (copied, never changed) to save time; "
+                    "only helps when the same folders are at the same paths")
+    a = ap.parse_args(argv)
+    last = [0.0]
+
+    def progress(done, total, what):
+        if time.time() - last[0] > 5 or done == total:
+            last[0] = time.time()
+            print(f"  {what}: {done:,} of {total:,}", flush=True)
+
+    reuse = core.default_db_path() if a.reuse_index == "default" else a.reuse_index
+    try:
+        audit.run(a.master, a.out, categories=a.categories, pp_root=a.pp, pp_data=a.pp_data, pp_images=a.pp_images,
+                  pp_multimedia=a.pp_multimedia, workdir=a.workdir, reuse_index=reuse, previous=a.previous, progress=progress)
+    except (ValueError, RuntimeError) as e:
+        print("Could not run the audit:", e)
+        return 2
+    print("Open this in Excel, Numbers or LibreOffice:", os.path.abspath(a.out))
+    return 0
+
+
 if __name__ == "__main__":
+    if len(sys.argv) >= 2 and sys.argv[1] == "--audit":
+        sys.exit(audit_cli(sys.argv[2:]))
     if len(sys.argv) >= 3 and sys.argv[1] == "--selftest":
         selftest(sys.argv[2])
     elif len(sys.argv) == 3 and sys.argv[1] == "--check-index":

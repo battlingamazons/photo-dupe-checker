@@ -75,6 +75,30 @@ ones already shown; the "at least __% similar" box beside it follows along, and 
 that similarity (0 shows everything, up to the best 500). Identical copies are always listed. Only the cards on screen are
 built and the pictures load in the background, so hundreds of matches stay responsive.
 
+## Collection audit (master folder vs categories vs the PastPerfect catalogue)
+A read-only command-line mode that compares the folder that should hold every photo (the *master* folder), a folder of
+category subfolders, and a PastPerfect catalogue, and writes a spreadsheet of problems for a volunteer to work through:
+
+    "Photo Duplicate Checker" --audit --master <master folder> --categories <categories folder> --pp <PastPerfect project folder> --out audit.xlsx
+
+(on a Mac the program is inside the app: `Photo Duplicate Checker.app/Contents/MacOS/Photo Duplicate Checker`). The PastPerfect
+Data (the `.DBF` tables), Images and Multimedia folders are found inside `--pp`; if they are not, give them with `--pp-data`,
+`--pp-images` and `--pp-multimedia`. The catalogue is read from `PHOTOS.DBF`, `OBJECTS.DBF`, `ARCHIVES.DBF`, `LIBRARY.DBF` and
+`MEDIA.DBF`: each record's picture (and high-resolution master) is found the way PastPerfect stores it (relative to the Images
+folder, backslashes, trailing dots; masters by file name under Multimedia).
+
+Photos are matched by what they look like (the checker's own matching), so a resaved, resized or renamed copy is still the same
+photo; the master folder is treated as the source of truth. The spreadsheet has one sheet per kind of problem, most important first:
+catalogue pictures with no match in the master folder, master photos no record uses, the same photo twice in the master folder,
+records whose picture file is missing, one photo attached to several records, photos only in the categories folder, and master
+photos not filed in a category. Every row has *Status* (a drop-down), *Done by* and *Notes*. Run it again after fixing things: rows
+that are still a problem keep their Status and Notes (`--previous old-report.xlsx`), fixed ones disappear. Nothing is ever changed:
+the folders and the catalogue are only read, and the audit keeps its own index (`--workdir`, default beside the report) so the
+checker's index is untouched (`--reuse-index` can start from a copy of it to save time). The report contains real file and
+record names, so keep it on the computer and out of any repository. Limits: the cropped-copy and face passes are not used here,
+so a heavily cropped scan shows up as two separate photos; and a very large group of look-alikes is listed for checking by
+eye instead of being trusted.
+
 ## Extremely cropped copies (found through faces)
 When one scan is only a small piece of the other (for example just the people at the bottom of a house photo), the pass above
 cannot see it. For photos with faces there is a further check: the program looks for faces in every photo (two small models,

@@ -706,7 +706,7 @@ class Index:
             return self._db.execute("SELECT COUNT(*) FROM files").fetchone()[0]
 
     # ---- indexing ----
-    def rescan(self, progress=None, cancel=None):
+    def rescan(self, progress=None, cancel=None, faces=True):
         """Index new/changed files in every folder; drop files that were deleted.
 
         A folder that can't be reached (e.g. unplugged drive) is skipped and
@@ -798,14 +798,14 @@ class Index:
             with self._lock:
                 self._db.commit()
                 self._cache = None
-        if not (cancel and cancel.is_set()):
+        if faces and not (cancel and cancel.is_set()):
             try:
                 self.scan_faces(progress, cancel)
             except Exception as e:  # noqa: BLE001  (faces are an extra; never fail the scan over them)
                 summary.setdefault("notes", []).append(f"Face matching could not run: {e}")
         return summary
 
-    def add_file(self, path):
+    def add_file(self, path, faces=True):
         """Add one photo (e.g. a confirmed-new scan) outside any watched folder."""
         path = os.path.normpath(path)
         st = os.stat(path)
@@ -819,10 +819,11 @@ class Index:
             self._db.execute("INSERT OR REPLACE INTO thumbs (path, img) VALUES (?,?)", (path, th))
             self._db.commit()
             self._cache = None
-        try:
-            self.scan_faces(only=[path])
-        except Exception:  # noqa: BLE001
-            pass
+        if faces:
+            try:
+                self.scan_faces(only=[path])
+            except Exception:  # noqa: BLE001
+                pass
 
     # ---- searching ----
     def find_exact(self, path):

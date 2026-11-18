@@ -7,3 +7,4 @@ pypdfium2
 rawpy
 opencv-python-headless
 tkinterdnd2
+xlsxwriter

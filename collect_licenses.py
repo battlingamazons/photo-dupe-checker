@@ -9,7 +9,7 @@ import sys
 from importlib import metadata
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-DIRECT = ["pillow", "numpy", "tifffile", "imagecodecs", "pillow-heif", "pypdfium2", "rawpy", "opencv-python-headless", "tkinterdnd2", "pyinstaller"]
+DIRECT = ["pillow", "numpy", "tifffile", "imagecodecs", "pillow-heif", "pypdfium2", "rawpy", "opencv-python-headless", "xlsxwriter", "tkinterdnd2", "pyinstaller"]
 PATTERN = re.compile(r"(licen[sc]e|copying|notice|authors)", re.I)
 
 

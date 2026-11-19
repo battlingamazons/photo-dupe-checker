@@ -39,8 +39,7 @@ install/run/uninstall) and the two Mac apps, then publishes the MSI and the Mac 
    "Exact copy already in the collection" and that file is shown first as **EXACT MATCH**. Photos indexed by an
    older version get their hash filled in by the next **Rescan folders** (it only reads the files, no re-analysis).
    A re-scan or re-saved copy is never byte-identical, so those are still found by the look-alike matching.
-4. If it really is new, **Add this photo to the collection** (or just save it
-   into a watched folder and rescan).
+4. If it really is new, save it into a watched folder (ideally the master folder) and rescan.
 
 The index is stored in `%APPDATA%\PhotoDupeChecker\index.db`. Photo files are
 never modified. If a folder's drive is unplugged during a rescan, its entries

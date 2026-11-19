@@ -564,8 +564,6 @@ class App(_Base):
         self.sens.bind("<<ComboboxSelected>>", lambda e: self.matches and self.show_results())
         self.btn_crop = ttk.Button(mid, text="Crop...", command=self.crop, state="disabled")
         self.btn_crop.pack(side="left", padx=(24, 0))
-        self.btn_addfile = ttk.Button(mid, text="Add this photo to the collection", command=self.add_current, state="disabled")
-        self.btn_addfile.pack(side="right", padx=8)
 
         self.verdict = tk.StringVar(value="Add your folders above, then drag a scan onto this window to check it.")
         self.verdict_label = tk.Label(self, textvariable=self.verdict, font=("Segoe UI", 14, "bold"), anchor="w", justify="left", wraplength=1000)
@@ -748,7 +746,6 @@ class App(_Base):
         self.btn_crop.config(state="disabled")
         self.btn_more.config(state="disabled")
         self.spin.config(state="disabled")
-        self.btn_addfile.config(state="disabled")
         self.verdict_label.config(fg="black")
         self.verdict.set(f"Checking {os.path.basename(path)} against {self.index.count():,} photos...")
 
@@ -828,7 +825,6 @@ class App(_Base):
             text += "   (this exact file is already in the index)"
         self.verdict.set(text)
         self.verdict_label.config(fg=COLORS.get(v, COLORS["likely duplicate"]))
-        self.btn_addfile.config(state="normal" if not self.already else "disabled")
         self.entries = self.more_entries()
         self._start_grid()
 
@@ -916,22 +912,6 @@ class App(_Base):
         self.shown = self.shown + take
         self._set_cutoff(min(self.cutoff, self.entries[take[-1]][1]))
         self._refresh_grid(first_new=first_new)
-
-    def add_current(self):
-        if not self.query_path:
-            return
-        try:
-            self.index.add_file(self.query_path)
-        except Exception as e:
-            messagebox.showerror("Could not add", str(e))
-            return
-        self.btn_addfile.config(state="disabled")
-        self.status.set(f"{self.index.count():,} photos indexed. Added {os.path.basename(self.query_path)}.")
-        messagebox.showinfo(
-            "Added",
-            "Added to the index. Note: it is remembered by its current location, "
-            "so keep the file there (or move it into one of the watched folders).",
-        )
 
 
 def selftest(out_path):
